@@ -1,0 +1,279 @@
+library(Seurat)
+library(Matrix)
+library(gridExtra)
+library(stringi)
+library(ComplexHeatmap)
+library(circlize)
+library(reshape2)
+library(scales)
+library(rlang)
+library(future)
+library(ggrepel)
+# library(harmony)
+library(rstatix)
+library(dplyr)
+library(stringr)
+library(ggthemes)
+library(cowplot)
+library(data.table)
+library(parallel)
+library(RColorBrewer)
+library(pheatmap)
+library(tidyr)
+library(readr)
+library(cba)
+# library(clusterProfiler)
+library(ggplot2)
+library(plyr)
+library(ggpubr)
+library(ggsci)
+library(sigminer)
+library(VennDiagram)
+library(ggtern)
+library(pbapply)
+
+#######################################--------------------------------------################################
+color_used <- c(pal_npg()(10),pal_igv()(9),pal_uchicago("light")(9),pal_futurama()(12), pal_aaas()(10), pal_jama()(7))[-8]
+condition_colors <- c("#E64B35FF", "#00A087FF", "#ADE2D0FF", "#3C5488FF", "#8491B4FF", "#D6D6CEFF", "#B09C85FF", "#7E6148FF")[c(6:8, 1:5)]
+
+#####--------------- read T cell metadat and TCR clone types information-----------------###########
+meta_sampleinfo <- read.table("E:\\8.Everyday_working\\R\\20210713_COV19_vaccine\\GSE158055_cell_annotation.csv", sep = ",", header = T, row.names = NULL, stringsAsFactors = F) %>% select(1:2)
+T_cells_meta.data <- read.table("E:\\8.Everyday_working\\R\\20211028_COVID19_Virus_reanalysis\\TNK\\meta.data.TNK.cell.txt", header = T, row.names = 1, stringsAsFactors = F, sep = "\t", comment.char = "", encoding = "UTF-8")
+
+bei <- T_cells_meta.data %>% subset(orig.ident != "Zhang" ) %>% select(orig.ident, SampleID, fixed_sample_ID:Samples_new, Sampleinfo:Groups, Condition:Major_celltype)
+
+bei$Sample_s <- bei %>% row.names %>% gsub(pattern = "_1_.*", replacement = "") %>%
+  gsub(pattern = "_hashtag_gene_.*", replacement = "") %>%
+  gsub(pattern = "_hashtag_gene*", replacement = "_1") %>%
+  gsub(pattern = "_cDNA", replacement = "") 
+
+bei$barcodes <- bei %>% row.names %>% gsub(pattern = "S.*_hashtag_gene_1_", replacement = "") %>%
+  gsub(pattern = "S.*_hashtag_gene_", replacement = "")
+
+bei$fixed_barcodes <- paste0(bei$Sample_s, "_", bei$barcodes)
+
+###-------------TCR clone types information-------------####
+dat <- data.frame()
+
+for (sample in dir("./TCR_sequencing/") %>% grep(pattern = ".csv", value = T)) {
+  if(nchar(sample) < 20){
+    fixed_sample_name <- sample %>% gsub(pattern = "_BCR.TCR.csv", replacement = "") %>% gsub(pattern = ".csv", replacement = "") 
+    tmp <- read.table(paste0("./TCR_sequencing/", sample), header = T, row.names = NULL, sep = ",", stringsAsFactors = F)
+    tmp$barcode <- paste0(fixed_sample_name, "_", tmp$barcode)
+    print(c(sample, tmp %>% dim))
+    dat <- rbind(dat, tmp)
+  }
+}
+
+dat <- dat[dat$barcode %in% bei$fixed_barcodes, ]
+dat$Sample_s <-  mapvalues(dat$barcode, from = bei$fixed_barcodes, to = bei$Sample_s, warn_missing = F)
+dat$raw_barcode <- mapvalues(dat$barcode, from = bei$fixed_barcodes, to = bei %>% rownames(), warn_missing = F)
+
+#####------------------------------Zhang---------------------------------------####
+zhang <- T_cells_meta.data %>% subset(orig.ident == "Zhang" ) %>% select(orig.ident, SampleID, fixed_sample_ID:Samples_new, Sampleinfo:Groups, Condition:Major_celltype)
+zhang$Sample_s <- zhang$SampleID
+
+zhang$barcodes <- zhang %>% row.names %>% gsub(pattern = "-.*", replacement = "")
+zhang$fixed_barcodes <- paste0(zhang$Sample_s, "_", zhang$barcodes, "-1")
+
+dat1 <- data.frame()
+for (sample in dir("./TCR_sequencing/") %>% grep(pattern = ".csv", value = T) %>% grep(pattern = "GSE158055", value = T, invert = T)) {
+  if(nchar(sample) > 20){
+    fixed_sample_name <- sample %>% gsub(pattern = "_filtered_contig_annotations.csv", replacement = "")
+    tmp <- read.table(paste0("./TCR_sequencing/", sample), header = T, row.names = NULL, sep = ",", stringsAsFactors = F)
+    tmp$barcode <- paste0(fixed_sample_name, "_", tmp$barcode)
+    print(c(sample, tmp %>% dim))
+    dat1 <- rbind(dat1, tmp)
+  }
+}
+
+dat1 <- dat1[dat1$barcode %in% zhang$fixed_barcodes, ]
+dat1$Sample_s <- mapvalues(dat1$barcode, from = zhang$fixed_barcodes, to = zhang$Sample_s, warn_missing = F)
+dat1$raw_barcode <- mapvalues(dat1$barcode, from = zhang$fixed_barcodes, to = zhang %>% rownames(), warn_missing = F)
+
+merged_dat <- rbind(dat, dat1) ### clonetype information
+
+merged_dat$is_cell <- NULL 
+merged_dat$contig_id <- NULL
+merged_dat$fwr1_nt <- NULL
+merged_dat$fwr2_nt <- NULL
+merged_dat$raw_consensus_id <- NULL
+
+merged_meta.data <- rbind(bei, zhang) ### metadat information
+
+merged_dat$Sampleinfo <- mapvalues(merged_dat$raw_barcode, from = merged_meta.data %>% rownames(), to = merged_meta.data$Sampleinfo, warn_missing = F)
+
+merged_dat$Vaccine_type <- mapvalues(merged_dat$raw_barcode, from = merged_meta.data %>% rownames(), to = merged_meta.data$Vaccine_type, warn_missing = F)
+merged_dat$Groups <- mapvalues(merged_dat$raw_barcode, from = merged_meta.data %>% rownames(), to = merged_meta.data$Groups, warn_missing = F)
+merged_dat$IgG <- mapvalues(merged_dat$raw_barcode, from = merged_meta.data %>% rownames(), to = merged_meta.data$IgG, warn_missing = F)
+merged_dat$Sex <- mapvalues(merged_dat$raw_barcode, from = merged_meta.data %>% rownames(), to = merged_meta.data$Sex, warn_missing = F)
+merged_dat$Condition <- mapvalues(merged_dat$raw_barcode, from = merged_meta.data %>% rownames(), to = merged_meta.data$Condition, warn_missing = F)
+merged_dat$Time_point <- mapvalues(merged_dat$raw_barcode, from = merged_meta.data %>% rownames(), to = merged_meta.data$Time_point, warn_missing = F)
+merged_dat$Major_celltype <- mapvalues(merged_dat$raw_barcode, from = merged_meta.data %>% rownames(), to = merged_meta.data$Major_celltype, warn_missing = F)
+
+##-------------------remove the cells with only one chain---------#################
+T_cell_clone <- merged_dat
+multiple_chains <- T_cell_clone[duplicated(T_cell_clone$raw_barcode), ] %>% `[`(, "raw_barcode") %>% unique()
+T_cell_clone <- T_cell_clone[T_cell_clone$raw_barcode %in% multiple_chains, ]
+
+barcodes_cells <- unique(T_cell_clone$raw_barcode)
+
+library(parallel)
+cl <- makeCluster(6)
+clusterExport(cl = cl, varlist = c("barcodes_cells", "T_cell_clone"))
+clusterEvalQ(cl, library(dplyr))
+qualited_T_cells <- pblapply(cl = cl, X = T_cell_clone, FUN = function(x){
+  tmp <- T_cell_clone[T_cell_clone$raw_barcode %in% x, "chain"] %>% unlist
+  if(all("TRB" %in% tmp, "TRA" %in% tmp)){
+    return(x)
+  }
+}) %>% do.call(rbind, .)
+stopCluster (cl)
+
+T_cell_clone_uniq <- T_cell_clone[T_cell_clone$raw_barcode %in% qualited_T_cells, ] ##
+T_cell_clone_uniq <- subset(T_cell_clone_uniq, c_gene != "")
+
+###-------------------remove the cells with only one chain---------#################
+multiple_chains <- T_cell_clone_uniq[duplicated(T_cell_clone_uniq$raw_barcode), ] %>% `[`(, "raw_barcode") %>% unique()
+T_cell_clone_uniq <- T_cell_clone_uniq[T_cell_clone_uniq$raw_barcode %in% multiple_chains, ] ##241735 qualited T cells
+T_cell_clone_uniq$unique_clone <-  with(T_cell_clone_uniq, paste0(v_gene, j_gene, cdr3))
+
+# select(T_cell_clone_uniq, c(raw_barcode, chain, unique_clone)) %>% write.table("TCR_info.txt", sep = "\t", col.names = T, row.names = F) ## save the TCR informations.
+TCR_info <- select(T_cell_clone_uniq, c(raw_barcode, chain, unique_clone))
+
+TCR_info <- read.table("TCR_info.txt", header = T, row.names = NULL, sep = "\t", stringsAsFactors = F)
+
+library(parallel)
+cl <- makeCluster(7) 
+barcodes_cells <- TCR_info$raw_barcode %>% unique
+clusterExport(cl = cl, varlist = c("TCR_info", "barcodes_cells"))
+clusterEvalQ(cl, library(dplyr))
+
+customer_clone <- pblapply(cl = cl, X = barcodes_cells, FUN = function(x){
+  tmp <- TCR_info %>% subset(raw_barcode == x) %>% select(chain, unique_clone) %>% arrange(desc(chain), desc(unique_clone))
+  clonetype_customer <- tmp$unique_clone %>% paste0(., collapse = "")
+  # dat <- data.frame(cellbarcode = x, clonetype_customer = clonetype_customer)
+  # dat <- c(cellbarcode = x, clonetype_customer = clonetype_customer)### ??һ????????һ??????һs????
+  dat <- c(x, clonetype_customer)
+}) %>% do.call(rbind, .)
+
+stopCluster(cl)
+
+colnames(customer_clone) <- c("cellbarcode", "clonetype_customer")
+customer_clone <- customer_clone %>% as.data.frame()
+# customer_clone %>% write.table("customer_clone.txt", sep = "\t", col.names = T, row.names = T)
+# customer_clone <- read.table("customer_clone.txt", sep = "\t", header = T, row.names = NULL, stringsAsFactors = F)
+
+T_cell_clone_uniq$customer_clone <- mapvalues(T_cell_clone_uniq$raw_barcode, from = customer_clone$cellbarcode, to = customer_clone$clonetype_customer, warn_missing = F)
+
+unique_TCR <- T_cell_clone_uniq %>% select(raw_barcode, customer_clone) %>% unique
+multiple_clones <- (c((unique_TCR$customer_clone %>% table) > 1) %>% names)[c(unique_TCR$customer_clone %>% table) > 1]
+T_cell_clone_uniq$multiple_clones <- mapvalues(T_cell_clone_uniq$customer_clone, from = multiple_clones, to = rep("Multiple", time = length(multiple_clones)), warn_missing = FALSE)
+T_cell_clone_uniq$multiple_clones <- gsub(T_cell_clone_uniq$multiple_clones, pattern = "^TR.*", replacement = "Single")
+
+T_cell_clone_uniq$IgG <- mapvalues(T_cell_clone_uniq$raw_barcode, from = merged_meta.data %>% row.names(), to = merged_meta.data$IgG, warn_missing = F)
+unique_TCR_pri <- T_cell_clone_uniq %>% select(raw_barcode, customer_clone, Sampleinfo) %>% unique
+unique_TCR_pri$customer_clone <- paste0(unique_TCR_pri$customer_clone) ###customer_clone: TRA+TRB+(both CDR3)
+unique_TCR_pri <- unique_TCR_pri %>% unique
+
+dats <- data.frame()
+x <- 1
+for(variable in unique_TCR_pri$Sampleinfo %>% unique) {
+  unique_TCR <- subset(unique_TCR_pri, Sampleinfo == variable)
+  Two_Ten <- c(table(unique_TCR$customer_clone) %>% names)[table(unique_TCR$customer_clone) >= 2 & table(unique_TCR$customer_clone) < 10]
+  Ten_fifty <- c(table(unique_TCR$customer_clone) %>% names)[table(unique_TCR$customer_clone) >= 10 & table(unique_TCR$customer_clone) < 50]
+  Fifty_100 <- c(table(unique_TCR$customer_clone) %>% names)[table(unique_TCR$customer_clone) >= 50 & table(unique_TCR$customer_clone) < 100]
+  one100_200 <- c(table(unique_TCR$customer_clone) %>% names)[table(unique_TCR$customer_clone) >= 100 & table(unique_TCR$customer_clone) < 200]
+  Two200 <- c(table(unique_TCR$customer_clone) %>% names)[table(unique_TCR$customer_clone) >= 200]
+  
+  df1 <- data.frame(customer_clones = c(Two_Ten, Ten_fifty, Fifty_100, one100_200, Two200),
+                    state = rep(c("2-10", "10-50", "50-100", "100-200", ">200"), time = c(sapply(list(Two_Ten, Ten_fifty, Fifty_100, one100_200, Two200), length))))
+  unique_TCR$clone_state <- mapvalues(unique_TCR$customer_clone, from = df1$customer_clones, to = df1$state, warn_missing = F)
+  unique_TCR$clone_state <- gsub(unique_TCR$clone_state, pattern = "^TR.*", replacement = "Single")
+  dats <- rbind(unique_TCR, dats)
+  print(variable)
+  print(x)
+  x <- x + 1
+  rm(df1, unique_TCR, Two_Ten, Ten_fifty, Fifty_100, one100_200, Two200)
+}
+
+T_cell_clone_uniq$clone_state <- mapvalues(T_cell_clone_uniq$customer_clone, from = dats$customer_clone, to = dats$clone_state, warn_missing = F)
+# T_cell_clone_uniq$clone_state <- gsub(T_cell_clone_uniq$clone_state, pattern = "2-10|10-50|50-100|100-200|>200", replacement = "Multiple")
+
+T_cell_clone_uniq %>% write.table(file = "merged_TCR.information_at_least_one_paired_VDJ.txt", sep = "\t", col.names = T, row.names = T)
+
+merged_meta.data$cloned_Tcells <- plyr::mapvalues(merged_meta.data %>% row.names(), from = T_cell_clone_uniq$raw_barcode, to = T_cell_clone_uniq$Sampleinfo, warn_missing = F)
+merged_meta.data$multiple_clones <- mapvalues(merged_meta.data %>% row.names(), from = T_cell_clone_uniq$raw_barcode, to = T_cell_clone_uniq$multiple_clones, warn_missing = F)
+merged_meta.data$multiple_clones <- gsub(merged_meta.data$multiple_clones, pattern = ".*-.*", replacement = "Not")
+
+merged_meta.data$customer_clone <- mapvalues(merged_meta.data %>% row.names(), from = T_cell_clone_uniq$raw_barcode, to = T_cell_clone_uniq$customer_clone, warn_missing = F)
+merged_meta.data %>% write.table("merged_meta.T_data.txt", col.names = T, row.names = T, sep = "\t")
+
+
+###-----------------------------GSE158055_cell_annotation.csv---------------------------------------demo data
+cellName	sampleID	celltype	majorType
+AACAGGGGTCGGATTT-0	S-S070-1	Mono_c1-CD14-CCL3	Mono
+AACCAACGTCCGAAAG-0	S-S070-1	B_c02-MS4A1-CD27	B
+AACCTTTGTAGCACGA-0	S-S070-1	B_c01-TCL1A	B
+AAGCATCTCTATCGCC-0	S-S070-1	Mono_c2-CD14-HLA-DPB1	Mono
+AATCACGGTCATAAAG-0	S-S070-1	B_c01-TCL1A	B
+AATCACGGTGGTTCTA-0	S-S070-1	B_c02-MS4A1-CD27	B
+AATGAAGCAACTGGTT-0	S-S070-1	Macro_c2-CCL3L1	Macro
+AATGAAGCACCAGCGT-0	S-S070-1	B_c01-TCL1A	B
+AATGCCATCACCTCGT-0	S-S070-1	T_CD4_c03-ITGA4	CD4
+AATGGCTCAAGGCTTT-0	S-S070-1	Mono_c1-CD14-CCL3	Mono
+ACACCAAGTTTGGAGG-0	S-S070-1	B_c04-SOX5-TNFRSF1B	B
+ACATCCCGTCTTACAG-0	S-S070-1	Mono_c3-CD14-VCAN	Mono
+ACATCCCGTTGGGATG-0	S-S070-1	Mono_c2-CD14-HLA-DPB1	Mono
+ACATTTCTCCGAGTGC-0	S-S070-1	B_c04-SOX5-TNFRSF1B	B
+ACCAAACTCGAGTACT-0	S-S070-1	Macro_c1-C1QC	Macro
+ACCAACATCGTGTTCC-0	S-S070-1	Mono_c3-CD14-VCAN	Mono
+ACGATGTGTACCTATG-0	S-S070-1	Mono_c3-CD14-VCAN	Mono
+ACGCACGAGAACCGCA-0	S-S070-1	Mono_c3-CD14-VCAN	Mono
+ACGCACGTCTGCCCTA-0	S-S070-1	B_c01-TCL1A	B
+ACGGGTCAGGGAGATA-0	S-S070-1	T_CD4_c04-ANXA2	CD4
+ACGGTCGAGTGCCAGA-0	S-S070-1	Mono_c3-CD14-VCAN	Mono
+ACGTTCCAGCTGCCTG-0	S-S070-1	B_c01-TCL1A	B
+ACTGTGAAGAACCCGG-0	S-S070-1	Mono_c5-CD16	Mono
+ACTTATCCACATATCG-0	S-S070-1	Mono_c2-CD14-HLA-DPB1	Mono
+ACTTATCCAGAACTTC-0	S-S070-1	T_CD8_c07-TYROBP	CD8
+ACTTCCGCAACTCCAA-0	S-S070-1	T_CD4_c03-ITGA4	CD4
+......
+......
+......
+
+###---------------------------------meta.data.TNK.cell.txt------------------------------------demo data
+orig.ident	nCount_RNA	nFeature_RNA	nCount_HTO	hash.ID	percent.mito	SampleID	Celltype	MajorType	Severity	Sample.time	Patients	Batch	fixed_sample_ID	Time_point	Patient_name	Sex	Vaccine_type	IgG	Batch_new	Samples_new	RNA_snn_res.1	seurat_clusters	final_cell_type	Final_Major_cell_type	Sampleinfo	Groups	nFeature_HTO	RNA_snn_res.0.4	Final_Major_cluster	Condition	Major_celltype
+S1_hashtag_gene_1_AAACCTGAGACGACGT-1	S1_1	5100	1381	627	A255	0.00882352941176471	NA	NA	NA	NA	NA	NA	NA	S1	A28	xxm	female	Virus	High	Bei	S1_A255	4	4	CD8 TN	Naive T	S1-A28	Virus	4	6	Naive T	Virus-A28	CD8 TN
+S1_hashtag_gene_1_AAACCTGAGATGTGTA-1	S1_1	3794	1238	373	A253	0.00263574064312072	NA	NA	NA	NA	NA	NA	NA	S1	A0	xxm	female	Virus	High	Bei	S1_A253	2	2	CD4 TCM	Naive T	S1-A0	Virus	4	4	Naive T	Virus-A0	CD4 TCM
+S1_hashtag_gene_1_AAACCTGAGCGTGTCC-1	S1_1	3427	914	2609	A252	0.0134228187919463	NA	NA	NA	NA	NA	NA	NA	S1	A0	xxm	female	Virus	High	Bei	S1_A252	0	0	CD4 TN	Naive T	S1-A0	Virus	4	2	Naive T	Virus-A0	CD4 TN
+S1_hashtag_gene_1_AAACCTGAGCTGCAAG-1	S1_1	3318	1021	1028	A252	0.00934297769740808	NA	NA	NA	NA	NA	NA	NA	S1	A0	xxm	female	Virus	High	Bei	S1_A252	0	0	CD4 TN	Naive T	S1-A0	Virus	4	2	Naive T	Virus-A0	CD4 TN
+S1_hashtag_gene_1_AAACCTGAGTACATGA-1	S1_1	3188	1257	486	A255	0.0150564617314931	NA	NA	NA	NA	NA	NA	NA	S1	A28	xxm	female	Virus	High	Bei	S1_A255	3	3	CD8 TEFF	Active T	S1-A28	Virus	4	3	Active T	Virus-A28	CD8 TEFF
+S1_hashtag_gene_1_AAACCTGAGTAGCGGT-1	S1_1	4451	1459	512	A254	0.0146034598966524	NA	NA	NA	NA	NA	NA	NA	S1	A28	xxm	female	Virus	High	Bei	S1_A254	2	2	CD4 TCM	MAIT	S1-A28	Virus	4	4	MAIT	Virus-A28	CD4 TCM
+S1_hashtag_gene_1_AAACCTGAGTATGACA-1	S1_1	1950	838	715	A252	0.0241025641025641	NA	NA	NA	NA	NA	NA	NA	S1	A0	xxm	female	Virus	High	Bei	S1_A252	4	4	CD8 TN	Naive T	S1-A0	Virus	4	6	Naive T	Virus-A0	CD8 TN
+S1_hashtag_gene_1_AAACCTGCAAAGCGGT-1	S1_1	2781	1109	1217	A253	0.0125854009349155	NA	NA	NA	NA	NA	NA	NA	S1	A0	xxm	female	Virus	High	Bei	S1_A253	3	3	CD8 TEFF	Active T	S1-A0	Virus	4	3	Active T	Virus-A0	CD4 TEFF
+S1_hashtag_gene_1_AAACCTGCAGCATACT-1	S1_1	2323	871	1098	A252	0.0133448127421438	NA	NA	NA	NA	NA	NA	NA	S1	A0	xxm	female	Virus	High	Bei	S1_A252	0	0	CD4 TN	Naive T	S1-A0	Virus	4	2	Naive T	Virus-A0	CD4 TN
+S1_hashtag_gene_1_AAACCTGCAGGGTATG-1	S1_1	4001	1206	1357	A252	0.00824793801549613	NA	NA	NA	NA	NA	NA	NA	S1	A0	xxm	female	Virus	High	Bei	S1_A252	4	4	CD8 TN	Naive T	S1-A0	Virus	4	6	Naive T	Virus-A0	CD8 TN
+S1_hashtag_gene_1_AAACCTGCAGTTTACG-1	S1_1	4460	1489	335	A254	0.0150224215246637	NA	NA	NA	NA	NA	NA	NA	S1	A28	xxm	female	Virus	High	Bei	S1_A254	8	8	GD	GD T	S1-A28	Virus	4	9	GD T	Virus-A28	GD T2
+S1_hashtag_gene_1_AAACCTGCATATGAGA-1	S1_1	1906	779	415	A253	0.00524658971668416	NA	NA	NA	NA	NA	NA	NA	S1	A0	xxm	female	Virus	High	Bei	S1_A253	0	0	CD4 TN	Naive T	S1-A0	Virus	4	2	Naive T	Virus-A0	CD4 TN
+S1_hashtag_gene_1_AAACCTGCATGTCCTC-1	S1_1	3514	1262	571	A253	0.00825270347182698	NA	NA	NA	NA	NA	NA	NA	S1	A0	xxm	female	Virus	High	Bei	S1_A253	2	2	CD4 TN	Naive T	S1-A0	Virus	4	2	Naive T	Virus-A0	CD4 TCM
+S1_hashtag_gene_1_AAACCTGGTAACGACG-1	S1_1	1545	700	1270	A252	0.0135922330097087	NA	NA	NA	NA	NA	NA	NA	S1	A0	xxm	female	Virus	High	Bei	S1_A252	2	2	CD4 TCM	Naive T	S1-A0	Virus	4	4	Naive T	Virus-A0	CD4 TCM
+S1_hashtag_gene_1_AAACCTGGTACCGTAT-1	S1_1	5997	1822	450	A253	0.00900450225112556	NA	NA	NA	NA	NA	NA	NA	S1	A0	xxm	female	Virus	High	Bei	S1_A253	0	0	CD4 TCM	Naive T	S1-A0	Virus	4	11	Naive T	Virus-A0	CD4 TN
+S1_hashtag_gene_1_AAACCTGGTAGCTCCG-1	S1_1	4555	1375	2269	A252	0.0103183315038419	NA	NA	NA	NA	NA	NA	NA	S1	A0	xxm	female	Virus	High	Bei	S1_A252	0	0	CD4 TN	Naive T	S1-A0	Virus	4	2	Naive T	Virus-A0	CD4 TN
+S1_hashtag_gene_1_AAACCTGGTAGTACCT-1	S1_1	1757	951	3209	A253	0.0432555492316448	NA	NA	NA	NA	NA	NA	NA	S1	A0	xxm	female	Virus	High	Bei	S1_A253	6	6	CD8 TEM	Active T	S1-A0	Virus	4	3	Active T	Virus-A0	CD8 TEM
+S1_hashtag_gene_1_AAACCTGGTATCTGCA-1	S1_1	1903	817	938	A253	0.0252233315817131	NA	NA	NA	NA	NA	NA	NA	S1	A0	xxm	female	Virus	High	Bei	S1_A253	6	6	CD8 TN	Active T	S1-A0	Virus	4	4	Active T	Virus-A0	CD8 TEM
+S1_hashtag_gene_1_AAACCTGGTCTCATCC-1	S1_1	5093	1489	647	A255	0.0113881798547025	NA	NA	NA	NA	NA	NA	NA	S1	A28	xxm	female	Virus	High	Bei	S1_A255	2	2	CD4 TCM	Naive T	S1-A28	Virus	4	4	Naive T	Virus-A28	CD4 TCM
+S1_hashtag_gene_1_AAACCTGGTGTTGGGA-1	S1_1	7918	2587	3703	A254	0.0252589037635767	NA	NA	NA	NA	NA	NA	NA	S1	A28	xxm	female	Virus	High	Bei	S1_A254	21	21	NK	Active T	S1-A28	Virus	4	1	Active T	Virus-A28	CD16 NK
+S1_hashtag_gene_1_AAACCTGGTTGTTTGG-1	S1_1	3718	1334	1559	A253	0.0129101667563206	NA	NA	NA	NA	NA	NA	NA	S1	A0	xxm	female	Virus	High	Bei	S1_A253	8	8	GD	GD T	S1-A0	Virus	4	9	GD T	Virus-A0	GD T2
+S1_hashtag_gene_1_AAACCTGTCAGTACGT-1	S1_1	4616	1230	516	A255	0.0151646447140381	NA	NA	NA	NA	NA	NA	NA	S1	A28	xxm	female	Virus	High	Bei	S1_A255	4	4	CD8 TN	Naive T	S1-A28	Virus	4	6	Naive T	Virus-A28	CD8 TN
+S1_hashtag_gene_1_AAACCTGTCAGTTTGG-1	S1_1	3276	1091	421	A255	0.00915750915750916	NA	NA	NA	NA	NA	NA	NA	S1	A28	xxm	female	Virus	High	Bei	S1_A255	0	0	CD4 TN	Naive T	S1-A28	Virus	4	2	Naive T	Virus-A28	CD4 TN
+S1_hashtag_gene_1_AAACCTGTCCTTGCCA-1	S1_1	4768	1441	474	A253	0.0132130872483221	NA	NA	NA	NA	NA	NA	NA	S1	A0	xxm	female	Virus	High	Bei	S1_A253	0	0	CD4 TN	Naive T	S1-A0	Virus	4	2	Naive T	Virus-A0	CD4 TN
+S1_hashtag_gene_1_AAACCTGTCGCCTGAG-1	S1_1	7170	2254	2776	A254	0.0160390516039052	NA	NA	NA	NA	NA	NA	NA	S1	A28	xxm	female	Virus	High	Bei	S1_A254	21	21	NK	Active T	S1-A28	Virus	4	1	Active T	Virus-A28	CD16 NK
+S1_hashtag_gene_1_AAACCTGTCTCGTTTA-1	S1_1	4055	1320	312	A255	0.01134401972873	NA	NA	NA	NA	NA	NA	NA	S1	A28	xxm	female	Virus	High	Bei	S1_A255	0	0	CD4 TCM	Naive T	S1-A28	Virus	4	2	Naive T	Virus-A28	CD4 TN
+......
+......
+......
+
+
+
+
