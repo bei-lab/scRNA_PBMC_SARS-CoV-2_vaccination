@@ -1,37 +1,15 @@
-library(Seurat)
-library(stringr)
-library(gridExtra)
-library(ggplot2)
-library(stringi)
-library(plyr)
-library(ggthemes)
-library(cowplot)
-library(data.table)
-library(RColorBrewer)
-library(ComplexHeatmap)
-library(pheatmap)
-library(reshape2)
-library(scales)
-library(rlang)
-library(future)
-library(parallel)
-library(ggrepel)
-library(ggsci)
-library(dplyr)
-library(harmony)
-library(ggpubr)
+packages <- list("Seurat", "Matrix", "stringr", "stringi", "ggplot2", "plyr", "ggthemes", "cowplot", "data.table", "SeuratData", "SeuratDisk", "future", "ggsci", "harmony", "ggpubr")
+lapply(packages, library, character.only = TRUE)
 
 options(future.globals.maxSize = 400*1000 * 1024^2)
-plan("multiprocess", workers = 40)
+plan("multiprocess", workers = 20)
 plan()
 
 color_used <- c(pal_npg()(10),pal_igv()(9),pal_uchicago("light")(9),pal_futurama()(12), pal_aaas()(10), pal_jama()(7))[-8]
 
-color_used <- c(pal_npg()(10),pal_igv()(9),pal_uchicago("light")(9),pal_futurama()(12), pal_aaas()(10), pal_jama()(7))[-8]
-
 ###------------------------------------------------------batch effect correction-----------------------------------------------------------###
+subset_cells <- get(load("Seurat.object.RData"))
 subset_cells <- NormalizeData(subset_cells, verbose = TRUE)
-subset_cells <- subset_cells %>% subset(ident = 30, invert = T)
 subset_cells <- FindVariableFeatures(subset_cells, nfeatures = 2000, selection.method = 'vst', mean.cutoff = c(0.1, Inf), dispersion.cutoff = c(0.5, Inf))
 subset_cells <- ScaleData(subset_cells, verbose = TRUE,  vars.to.regress = c("nCount_RNA", "percent.mito" ) )
 subset_cells <- RunPCA(subset_cells, features = setdiff(subset_cells@assays$RNA@var.features, row.names(subset_cells) %>% grep(pattern = "^MT-|^RPL|^RPS|^IGK|^IGV|^IGL|^IGH", v = T)) , npcs = 50, verbose = TRUE)
@@ -96,7 +74,6 @@ VlnPlot(subset_cells,
         cols = color_used) #+
   #theme(legend.position = "none") + ggtitle("identities on y-axis")
 dev.off()
-
 
 write.table(top50,
             file = "All_cell_major_cluster_top50_DEGs.csv",
