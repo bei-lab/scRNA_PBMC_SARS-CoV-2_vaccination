@@ -44,7 +44,7 @@ HASHTAG259,A259,R2,5PNNNNNNNNNN(BC),CAGTAGTCACGGTCA,Antibody Capture
 HASHTAG260,A260,R2,5PNNNNNNNNNN(BC),ATTGACCCGCGTTAG,Antibody Capture
 
 ###---------------------------------------------Step 2. Split cells according to the expression of antibody----------------------------### (R Script)
-packages <- list("Seurat", "Matrix", "stringr", "stringi", "ggplot2", "plyr", "ggthemes", "cowplot", "data.table", "SeuratData", "SeuratDisk", "future", "ggsci")
+packages <- list("Seurat", "Matrix", "stringr", "stringi", "ggplot2", "plyr", "ggthemes", "cowplot", "data.table", "SeuratData", "SeuratDisk", "future", "ggsci", "ggpubr")
 lapply(packages, library, character.only = TRUE)
 
 options(future.globals.maxSize = 100*1000 * 1024^2)
