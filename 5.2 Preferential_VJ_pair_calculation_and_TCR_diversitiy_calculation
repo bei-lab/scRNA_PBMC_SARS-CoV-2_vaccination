@@ -1,4 +1,4 @@
- library(Seurat)
+library(Seurat)
 library(ggpubr)
 library(plyr)
 library(dplyr)
@@ -36,9 +36,7 @@ T_cell_clone_uniq <- read.table(file = "merged_TCR.information_at_least_one_pair
 df_for_plot <- merged_meta.data %>%
 	dplyr::select(fixed_barcodes, Sample_s, Condition, multiple_clones, customer_clone, Patient_name, Major_celltype)
 
-df_for_plot$Major_celltype <- factor(df_for_plot$Major_celltype %>% as.character(),
-																		 levels = c(df_for_plot$Major_celltype %>% table %>% sort %>% names) %>%
-																		 	setdiff(., "Doublets"))
+df_for_plot$Major_celltype <- factor(df_for_plot$Major_celltype %>% as.character(), levels = c(df_for_plot$Major_celltype %>% table %>% sort %>% names) %>% setdiff(., "Doublets"))
 
 df_for_plot$multiple_clones <- factor(df_for_plot$multiple_clones, levels = rev(c("Multiple", "Single", "Not")))
 
@@ -70,15 +68,15 @@ T_cell_clone_uniq$Condition <- T_cell_clone_uniq$Condition %>%
 	gsub(pattern = "Virus-A42", replacement = "IVV-D42") %>%
 	gsub(pattern = "A42-A28", replacement = "D42-D28")
 
-T_cell_clone_uniq$Condition <- factor(T_cell_clone_uniq$Condition %>% as.character(),
-																			levels = c("IVV-D0",
-																								 "IVV-D28",
-																								 "IVV-D42",
-																								 "HD",
-																								 "MP",
-																								 "MC",
-																								 "SP",
-																								 "SC"))
+T_cell_clone_uniq$Condition <- factor(T_cell_clone_uniq$Condition %>% as.character(), levels = c("IVV-D0",
+"IVV-D28",
+"IVV-D42",
+"HD",
+"MP",
+"MC",
+"SP",
+"SC"))
+
 cols1 <- c(rgb2hex(r = 96, g = 12, b = 22), rgb2hex(r = 245, g = 207, b = 193))
 # Basic piechart
 dat_to_plot <- T_cell_clone_uniq %>% dplyr::select(barcode, customer_clone, Sex, Groups, Condition, Sampleinfo, clone_state, IgG) %>% unique()
@@ -98,7 +96,7 @@ ggplot(df1, aes(x = Condition, fill = clone_state)) +
 	labs(title = "")
 
 ###---------mapped T cell----------###
-####----------------------------------------calculate the useage of VDJ genes---------------------------------------------------####
+####----------------------------------------calculate the odds ratio of paired VJ genes in samples after vaccination---------------------------------------------------####
 df_for_VDJ <- T_cell_clone_uniq %>%
 	dplyr::select(barcode, chain, Condition, clone_state, customer_clone, Major_celltype, v_gene, j_gene, Groups, IgG)
 
@@ -218,7 +216,7 @@ ggscatter(dfs, x = "A28_A0", y = "results_A42_A0",
 	geom_vline(xintercept = 1, linetype = "dashed", 
 						 color = "red", size = 1)
 
-###------------------------------------------------VDJ usasge of COVID19------------------------###############
+###------------------------------------------------calculate the odds ratio of paired VJ genes in samples after natural infection------------------------###############
 df_for_VDJ <- T_cell_clone_uniq %>%
 	dplyr::select(barcode, chain, Condition, clone_state, customer_clone, Major_celltype, v_gene, j_gene, Groups, Sex, Sampleinfo)
 
