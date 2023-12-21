@@ -1,0 +1,463 @@
+ library(Seurat)
+library(ggpubr)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(ggthemes)
+library(cowplot)
+library(data.table)
+library(parallel)
+library(RColorBrewer)
+library(pheatmap)
+library(tidyr)
+library(readr)
+library(cba)
+library(Startrac)
+library(ggsci)
+library(igraph)
+library(sigminer)
+library(VennDiagram)
+library(ggtern)
+library(scales)
+library(alakazam)
+library(shazam)
+library(ggalluvial)
+options(ggrepel.max.overlaps = Inf)
+
+#######################################--------------------------------------################################
+color_used <- c(pal_npg()(10),pal_igv()(9),pal_uchicago("light")(9),pal_futurama()(12), pal_aaas()(10), pal_jama()(7))[-8]
+condition_colors <- c("#E64B35FF", "#00A087FF", "#ADE2D0FF", "#3C5488FF", "#8491B4FF", "#D6D6CEFF", "#B09C85FF", "#7E6148FF")[c(6:8, 1:5)]
+
+merged_meta.data <- read.table(file = "merged_meta.T_data.txt", header = T, row.names = 1, sep = "\t")
+T_cell_clone_uniq <- read.table(file = "merged_TCR.information_at_least_one_paired_VDJ.txt", sep = "\t", header = T, row.names = 1, stringsAsFactors = F)
+
+###----------------plot the detectable TCR cells----------------------------###
+df_for_plot <- merged_meta.data %>%
+	dplyr::select(fixed_barcodes, Sample_s, Condition, multiple_clones, customer_clone, Patient_name, Major_celltype)
+
+df_for_plot$Major_celltype <- factor(df_for_plot$Major_celltype %>% as.character(),
+																		 levels = c(df_for_plot$Major_celltype %>% table %>% sort %>% names) %>%
+																		 	setdiff(., "Doublets"))
+
+df_for_plot$multiple_clones <- factor(df_for_plot$multiple_clones, levels = rev(c("Multiple", "Single", "Not")))
+
+cols <- c(rgb2hex(r = 213, g = 234, b = 205), rgb2hex(r = 132, g = 197, b = 134), rgb2hex(r = 48, g = 154, b = 78))
+
+ggplot(df_for_plot, aes(x = Major_celltype,  fill = multiple_clones)) + 
+	geom_bar(position = "stack", width = 0.9) +
+	scale_y_continuous(expand = c(0, 1000), breaks = seq(0, 150000L, by = 20000L)) +
+	theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+	labs(x = "Sample",
+			 y = "Number of cells") +
+	coord_flip() +
+	scale_fill_discrete(breaks = c('Multiple', 'Single', 'Not')) +
+	scale_fill_manual(values = (cols)) + 
+	theme_classic()
+
+###----------------plot the clone state of TCR cells----------------------------###
+T_cell_clone_uniq$clone_state <- factor(T_cell_clone_uniq$clone_state, levels = rev(c("Single", "2-10", "10-50", "50-100", "100-200", ">200")))
+
+T_cell_clone_uniq$Condition <- T_cell_clone_uniq$Condition %>%
+	as.character %>%
+	gsub(pattern = "control-control-", replacement = "HD") %>% 
+	gsub(pattern = "mild/moderate-progression-", replacement = "MP") %>% 
+	gsub(pattern = "mild/moderate-convalescence-", replacement = "MC") %>% 
+	gsub(pattern = "severe/critical-progression-", replacement = "SP") %>% 
+	gsub(pattern = "severe/critical-convalescence-", replacement = "SC") %>% 
+	gsub(pattern = "Virus-A0", replacement = "IVV-D0") %>% 
+	gsub(pattern = "Virus-A28", replacement = "IVV-D28") %>% 
+	gsub(pattern = "Virus-A42", replacement = "IVV-D42") %>%
+	gsub(pattern = "A42-A28", replacement = "D42-D28")
+
+T_cell_clone_uniq$Condition <- factor(T_cell_clone_uniq$Condition %>% as.character(),
+																			levels = c("IVV-D0",
+																								 "IVV-D28",
+																								 "IVV-D42",
+																								 "HD",
+																								 "MP",
+																								 "MC",
+																								 "SP",
+																								 "SC"))
+cols1 <- c(rgb2hex(r = 96, g = 12, b = 22), rgb2hex(r = 245, g = 207, b = 193))
+# Basic piechart
+dat_to_plot <- T_cell_clone_uniq %>% dplyr::select(barcode, customer_clone, Sex, Groups, Condition, Sampleinfo, clone_state, IgG) %>% unique()
+dat_to_plot$customer_clone <- paste0(dat_to_plot$customer_clone, dat_to_plot$Sampleinfo)
+
+df1 <- dat_to_plot %>% subset(c(Groups == "Virus")) %>% dplyr::select(clone_state, Condition, IgG)
+
+ggplot(df1, aes(x = Condition, fill = clone_state)) +
+	geom_bar(position = "fill", width = 0.99, color = "white") +
+	coord_polar("y", start = 0) +
+	facet_grid( ~ IgG) +
+	scale_fill_manual(values = rev(c("#309a4e", colorRampPalette(brewer_pal(palette="YlOrRd")(9)[c(3, 8)])(5))[1:(df1$clone_state %>% unique %>% length)])) + 
+	theme_classic() +
+	theme(#legend.position="none",
+		axis.title = element_blank(),
+		axis.text = element_blank()) +
+	labs(title = "")
+
+###---------mapped T cell----------###
+####----------------------------------------calculate the useage of VDJ genes---------------------------------------------------####
+df_for_VDJ <- T_cell_clone_uniq %>%
+	dplyr::select(barcode, chain, Condition, clone_state, customer_clone, Major_celltype, v_gene, j_gene, Groups, IgG)
+
+Odd_calculation <- function(Chain, Group, IgG1 = "All"){
+	if(Chain == "TRA" &  IgG1 == "All"){
+		print("All TRA")
+		df_for_VDJ_Hchain <- df_for_VDJ %>% subset(chain == "TRA" & Groups == Group) %>% mutate(V_J_pairs = paste0(v_gene, "_", j_gene))
+	} else if(Chain == "TRB" & IgG1 == "All"){
+		print("All TRB")
+		df_for_VDJ_Hchain <- df_for_VDJ %>% subset(chain == "TRB" & Groups == Group) %>% mutate(V_J_pairs = paste0(v_gene, "_", j_gene))
+	} else if(Chain == "TRA" & IgG1 != "All"){
+		df_for_VDJ_Hchain <- df_for_VDJ %>% subset(chain == "TRA" & Groups == Group & IgG == IgG1) %>% mutate(V_J_pairs = paste0(v_gene, "_", j_gene))
+	} else if(Chain == "TRB" & IgG1 != "All"){
+		df_for_VDJ_Hchain <- df_for_VDJ %>% subset(chain == "TRB" & Groups == Group & IgG == IgG1) %>% mutate(V_J_pairs = paste0(v_gene, "_", j_gene))
+	}
+	
+	df_for_VDJ_Hchain$Condition <- df_for_VDJ_Hchain$Condition %>% as.character()
+	
+	freqs_vdj_pairs <- with(df_for_VDJ_Hchain, table(Condition, V_J_pairs)) %>% t %>% unclass %>% as.data.frame()
+	rown <- row.names(freqs_vdj_pairs)
+	cs <- freqs_vdj_pairs %>% colSums()
+	
+	A28 <- length(rown) - c(rown[rowSums(freqs_vdj_pairs[, 1:2]) == 0] %>% length)
+	A42 <- length(rown) - c(rown[rowSums(freqs_vdj_pairs[, c(1, 3)]) == 0] %>% length)
+	print(c(A28 = A28, A42 = A42))
+	
+	results_A28_A0 <- lapply(1:dim(freqs_vdj_pairs)[1], FUN = function(vdj_comb) {
+		tmp_matrix <- matrix(c(freqs_vdj_pairs[vdj_comb, 2], freqs_vdj_pairs[vdj_comb, 1], cs[2]-freqs_vdj_pairs[vdj_comb, 2], cs[1]-freqs_vdj_pairs[vdj_comb, 1]), nrow = 2)
+		fisher <- fisher.test(tmp_matrix)
+		chisq <- chisq.test(tmp_matrix)
+		
+		if(min(tmp_matrix) < 5){
+			p <- fisher$p.value
+			OR <-  fisher$estimate
+			return(c(p, OR, rown[vdj_comb]))
+		} else {
+			p <- chisq$p.value
+			OR <-  fisher$estimate
+			return(c(p, OR, rown[vdj_comb]))
+		}
+	}
+	) %>% do.call(rbind,. ) %>% as.data.frame()
+	
+	results_A42_A0 <- lapply(1:dim(freqs_vdj_pairs)[1], FUN = function(vdj_comb) {
+		tmp_matrix <- matrix(c(freqs_vdj_pairs[vdj_comb, 3], freqs_vdj_pairs[vdj_comb, 1],  cs[3]-freqs_vdj_pairs[vdj_comb, 3], cs[1]-freqs_vdj_pairs[vdj_comb, 1]), nrow = 2)
+		fisher <- fisher.test(tmp_matrix)
+		chisq <- chisq.test(tmp_matrix)
+		if(min(tmp_matrix) < 5){
+			p <- fisher$p.value
+			OR <-  fisher$estimate
+			return(c(p, OR, rown[vdj_comb]))
+		} else {
+			p <- chisq$p.value
+			OR <-  fisher$estimate
+			return(c(p, OR, rown[vdj_comb]))
+		}
+	}
+	) %>% do.call(rbind,. ) %>% as.data.frame()
+	
+	
+	df <- data.frame(A28_A0 = results_A28_A0$`odds ratio` %>% as.numeric(),
+									 results_A42_A0 = results_A42_A0$`odds ratio` %>% as.numeric(),
+									 sig_A28 = results_A28_A0$V1 %>% as.numeric(),
+									 sig_A42 = results_A42_A0$V1 %>% as.numeric())
+	
+	row.names(df) <- rown
+	
+	results_A28_A0$V1 <- ifelse(as.numeric(results_A28_A0$V1) <= 0.05, 1, 0)
+	results_A28_A0$'odds ratio' <- results_A28_A0$'odds ratio' %>% as.numeric()
+	results_A28_A0$'odds ratio' <- mapvalues(results_A28_A0$'odds ratio', from = c(Inf), to = results_A28_A0$'odds ratio'[!is.infinite(results_A28_A0$'odds ratio')] %>% max)
+	
+	results_A42_A0$V1 <- ifelse(as.numeric(results_A42_A0$V1) <= 0.05, 1, 0)
+	results_A42_A0$'odds ratio' <- results_A42_A0$'odds ratio' %>% as.numeric()
+	results_A42_A0$'odds ratio' <- mapvalues(results_A42_A0$'odds ratio', from = c(Inf), to = results_A42_A0$'odds ratio'[!is.infinite(results_A42_A0$'odds ratio')] %>% max)
+	
+	dfs <- data.frame(A28_A0 = results_A28_A0$`odds ratio` %>% as.numeric(),
+										results_A42_A0 = results_A42_A0$`odds ratio` %>% as.numeric(),
+										sig_A28 = results_A28_A0$V1,
+										sig_A42 = results_A42_A0$V1
+	)
+	
+	row.names(dfs) <- rown
+	dfs$Group <- ifelse(dfs$sig_A28 + dfs$sig_A42 == 2,
+											"Both", ifelse(dfs$sig_A28 == 1 & dfs$sig_A42 == 0, "A28", ifelse(dfs$sig_A28 == 0 & dfs$sig_A42 == 1,"A42", "Non")))
+	dfs$Group <- factor(dfs$Group, levels = c("Both", "A28", "A42", "Non"))
+	dfs$labels <- paste0(rown, dfs$Group)
+	
+	dfs$labels <- gsub(dfs$labels, pattern = ".*Non$", replacement = "")
+	labes <- dfs$labels[dfs$results_A42_A0 > 5 | dfs$A28_A0 > 5]
+	dfs$labels <- ""
+	dfs$labels[dfs$results_A42_A0 > 5 | dfs$A28_A0 > 5] <- labes 
+	return(list(dfs, df))
+}
+
+IGH <- Odd_calculation("TRA", "Virus")
+IGH_non <- Odd_calculation("TRB", "Virus")
+
+# df_ori <- rbind(IGH[[2]], IGH_non[[2]]) %>% as.data.frame()
+# df_ori %>% write.table(file = "Virus_A28_A42_all_usage_test_of_paired_VDJ_TCR_genes.txt", sep = "\t", col.names = T, row.names = T)
+
+dfs <- rbind(IGH[[1]], IGH_non[[1]]) %>% as.data.frame()
+
+dfs[dfs[, 1] > 12, 1] <- 12
+dfs[dfs[, 2] > 12, 2] <- 12
+
+colrs <- c("#FC4E07", "#00AFBB", "#E7B800", "grey")
+names(colrs) <- c("Both", "A28", "A42", "Non")
+
+ggscatter(dfs, x = "A28_A0", y = "results_A42_A0",
+					color = "Group",
+					palette = colrs[dfs$Group %>% unique() %>% sort()],
+					label = "labels", repel = T, max.overlaps = Inf) +
+	scale_y_continuous(breaks = seq(0, max(dfs$results_A42_A0), 1)) +
+	scale_x_continuous(breaks = seq(0, max(dfs$A28_A0), 1)) +
+	geom_hline(yintercept = 1, linetype = "dashed", 
+						 color = "red", size = 1) +
+	geom_vline(xintercept = 1, linetype = "dashed", 
+						 color = "red", size = 1)
+
+###------------------------------------------------VDJ usasge of COVID19------------------------###############
+df_for_VDJ <- T_cell_clone_uniq %>%
+	dplyr::select(barcode, chain, Condition, clone_state, customer_clone, Major_celltype, v_gene, j_gene, Groups, Sex, Sampleinfo)
+
+Odd_calculation <- function(Chain, Group, Sex1 = "All"){
+	if(Chain == "TRA"){
+		df_for_VDJ_Hchain <- df_for_VDJ %>% subset(chain == "TRA" & Groups == "Publication") %>% mutate(V_J_pairs = paste0(v_gene, "_", j_gene))
+	} else if(Chain == "TRB") {
+		df_for_VDJ_Hchain <- df_for_VDJ %>% subset(chain == "TRB" & Groups == Group) %>% mutate(V_J_pairs = paste0(v_gene, "_", j_gene))
+	}
+	
+	df_for_VDJ_Hchain$Condition <- df_for_VDJ_Hchain$Condition %>% as.character()
+	
+	freqs_vdj_pairs <- with(df_for_VDJ_Hchain, table(Condition, V_J_pairs)) %>% t %>% unclass %>% as.data.frame()
+	rown <- row.names(freqs_vdj_pairs)
+	cs <- freqs_vdj_pairs %>% colSums()
+	
+	MC <- length(rown) - c(rown[rowSums(freqs_vdj_pairs[, 1:2]) == 0] %>% length)
+	MP <- length(rown) - c(rown[rowSums(freqs_vdj_pairs[, c(1, 3)]) == 0] %>% length)
+	SC <- length(rown) - c(rown[rowSums(freqs_vdj_pairs[, c(1, 4)]) == 0] %>% length)
+	SP <- length(rown) - c(rown[rowSums(freqs_vdj_pairs[, c(1, 5)]) == 0] %>% length)
+	print(c(MC = MC, MP = MP, SC = SC, SP = SP))
+	
+	Calculate_P_and_OR <- function(x, index1, index2, dat, cs) {result <- lapply(1:dim(x)[1], FUN = function(vdj_comb, index1, index2, dat, cs) {
+		### x and dat are freqs_vdj_pairs
+		### index1 and index2 is colum number of freqs_vdj_pairs, and index1 indicate the reference column; eg: index2 = 2, index1 = 1 indicated oR was index2/index1.
+		### cs is colSums of freqs_vdj_pairs
+		tmp_matrix <- matrix(c(dat[vdj_comb, index2], dat[vdj_comb, index1], cs[index2]-dat[vdj_comb, index2], cs[index1]-dat[vdj_comb, index1]), nrow = 2)
+		fisher <- fisher.test(tmp_matrix)
+		chisq <- chisq.test(tmp_matrix)
+		if(min(tmp_matrix) < 5 & any(tmp_matrix[, 1]) == TRUE){
+			p <- fisher$p.value
+			OR <-  fisher$estimate
+			tmp <- c(p, OR, rown[vdj_comb])
+			return(tmp)
+		} else if(min(tmp_matrix) >= 5) {
+			p <- chisq$p.value
+			OR <-  fisher$estimate
+			tmp <- c(p, OR, rown[vdj_comb])
+			return(tmp)
+		} else {
+			p <- chisq$p.value
+			OR <-  fisher$estimate
+			tmp <- c(p, OR, rown[vdj_comb])
+			tmp[c(1)] <- 1
+			tmp[c(2)] <- 500
+			return(tmp)
+		}
+	}, index1 = index1, index2 = index2, dat = dat, cs = cs) %>% do.call(rbind,. ) %>% as.data.frame()
+	return(result)
+	}
+	
+	COV19_MC <- Calculate_P_and_OR(x = freqs_vdj_pairs, index1 = 1, index2 = 2, dat = freqs_vdj_pairs, cs = cs)   
+	COV19_MP <- Calculate_P_and_OR(x = freqs_vdj_pairs, index1 = 1, index2 = 3, dat = freqs_vdj_pairs, cs = cs)    
+	COV19_SC <- Calculate_P_and_OR(x = freqs_vdj_pairs, index1 = 1, index2 = 4, dat = freqs_vdj_pairs, cs = cs)    
+	COV19_SP <- Calculate_P_and_OR(x = freqs_vdj_pairs, index1 = 1, index2 = 5, dat = freqs_vdj_pairs, cs = cs)    
+	
+	df1 <- data.frame(COV19_MC_OR = COV19_MC$`odds ratio` %>% as.numeric(),
+										COV19_SC_OR = COV19_SC$`odds ratio` %>% as.numeric(),
+										sig_MC = COV19_MC$V1,
+										sig_SC = COV19_SC$V1)
+	row.names(df1) <- rown
+	
+	df2 <- data.frame(COV19_MP_OR = COV19_MP$`odds ratio` %>% as.numeric(),
+										COV19_SP_OR = COV19_SP$`odds ratio` %>% as.numeric(),
+										sig_MP = COV19_MP$V1,
+										sig_SP = COV19_SP$V1)
+	row.names(df2) <- rown
+	
+	df <- cbind(df1, df2) %>% as.data.frame()
+	
+	df_cp <- df
+	df_cp$sig_MC <- ifelse(as.numeric(df_cp$sig_MC) <= 0.05, 1, 0)
+	df_cp$sig_SC <- ifelse(as.numeric(df_cp$sig_SC) <= 0.05, 1, 0)
+	df_cp$sig_MP <- ifelse(as.numeric(df_cp$sig_MP) <= 0.05, 1, 0)
+	df_cp$sig_SP <- ifelse(as.numeric(df_cp$sig_SP) <= 0.05, 1, 0)
+	
+	df_cp$COV19_MC_OR <-  mapvalues(df_cp$COV19_MC_OR, from = c(Inf), to = df_cp$COV19_MC_OR[!is.infinite(df_cp$COV19_MC_OR)] %>% setdiff(500) %>% max)
+	df_cp$COV19_SC_OR <-  mapvalues(df_cp$COV19_SC_OR, from = c(Inf), to = df_cp$COV19_SC_OR[!is.infinite(df_cp$COV19_SC_OR)] %>% setdiff(500) %>% max)
+	df_cp$COV19_MP_OR <-  mapvalues(df_cp$COV19_MP_OR, from = c(Inf), to = df_cp$COV19_MP_OR[!is.infinite(df_cp$COV19_MP_OR)] %>% setdiff(500) %>% max)
+	df_cp$COV19_SP_OR <-  mapvalues(df_cp$COV19_SP_OR, from = c(Inf), to = df_cp$COV19_SP_OR[!is.infinite(df_cp$COV19_SP_OR)] %>% setdiff(500) %>% max)
+	
+	dfs <- df_cp
+	
+	row.names(dfs) <- rown
+	
+	C_group <- dfs[, 1:4] %>% subset(!c(COV19_MC_OR == 500 & COV19_SC_OR == 500)) %>% as.matrix()
+	C_group[C_group == 500] <- 1
+	C_group <- C_group %>% as.data.frame()
+	
+	S_group <- dfs[, 5:8] %>% subset(!c(COV19_MP_OR == 500 & COV19_SP_OR == 500)) %>% as.matrix()
+	S_group[S_group == 500] <- 1
+	S_group <- S_group %>% as.data.frame()
+	
+	###------C_group-----####
+	C_group$Group <- ifelse(C_group$sig_MC + C_group$sig_SC == 2,
+													"Both", ifelse(C_group$sig_MC == 1 & C_group$sig_SC == 0, "C", ifelse(C_group$sig_MC == 0 & C_group$sig_SC == 1, "P", "Non")))
+	
+	if(c(C_group$Group %>% unique %>% length) == 4){
+		C_group$Group <- factor(C_group$Group, levels = c("Both", "C", "P", "Non"))
+		C_group$labels <- paste0(rownames(C_group), C_group$Group)
+	} else if(c(C_group$Group %>% unique %>% length) > 0){
+		C_group$Group <- factor(C_group$Group, levels = intersect(c("Both", "C", "P", "Non"), c(C_group$Group %>% unique %>% length)))
+		C_group$labels <- paste0(rownames(C_group), C_group$Group)
+	}
+	
+	C_group$labels <- gsub(C_group$labels, pattern = ".*Non$", replacement = "")
+	labes <- C_group$labels[C_group$COV19_MC_OR > 3 & C_group$COV19_SC_OR > 3 & C_group$sig_MC == 1 & C_group$sig_SC == 1]
+	C_group$labels <- ""
+	C_group$labels[C_group$COV19_MC_OR > 3 & C_group$COV19_SC_OR > 3 & C_group$sig_MC == 1 & C_group$sig_SC == 1] <- labes
+	
+	###------S_group-----####
+	S_group$Group <- ifelse(S_group$sig_MP + S_group$sig_SP == 2,
+													"Both", ifelse(S_group$sig_MP == 1 & S_group$sig_SP == 0, "C", ifelse(S_group$sig_MP == 0 & S_group$sig_SP == 1, "P", "Non")))
+	
+	if(c(S_group$Group %>% unique %>% length) == 4){
+		S_group$Group <- factor(S_group$Group, levels = c("Both", "C", "P", "Non"))
+		S_group$labels <- paste0(rownames(S_group), S_group$Group)
+	} else if(c(S_group$Group %>% unique %>% length) > 0){
+		S_group$Group <- factor(S_group$Group, levels = intersect(c("Both", "C", "P", "Non"), c(S_group$Group %>% unique %>% length)))
+		S_group$labels <- paste0(rownames(S_group), S_group$Group)
+	}
+	
+	S_group$labels <- gsub(S_group$labels, pattern = ".*Non$", replacement = "")
+	labes <- S_group$labels[S_group$COV19_MP_OR > 3 & S_group$COV19_SP_OR > 3 & S_group$sig_MP == 1 & S_group$sig_SP == 1]
+	S_group$labels <- ""
+	S_group$labels[S_group$COV19_MP_OR > 3 & S_group$COV19_SP_OR > 3 & S_group$sig_MP == 1 & S_group$sig_SP == 1] <- labes
+	
+	return(list(df, C_group, S_group))
+}
+
+##--------------C: m grooup, P: S group
+IGH <- Odd_calculation(Chain = "TRA", Group = "Publication")
+IGH_non <- Odd_calculation(Chain = "TRB", Group = "Publication")
+
+# df_ori <- rbind(IGH[[1]], IGH_non[[1]]) %>% as.data.frame()
+# df_ori %>% write.table(file = "COV19_all_usage_test_of_paired_VDJ_genes.txt", sep = "\t", col.names = T, row.names = T)
+
+dfs <- rbind(IGH[[3]], IGH_non[[3]]) %>% as.data.frame() 
+dfs <- dfs %>% subset(c(dfs[,1] + dfs[,2]) > 0.0001)
+
+dfs[dfs[, 1] > 15, 1] <- 15
+dfs[dfs[, 2] > 15, 2] <- 15
+dfs <- dfs %>% as.data.frame()
+
+colrs <- c("#FC4E07", "#00AFBB", "#E7B800", "grey")
+names(colrs) <- c("Both", "P", "C", "Non")
+
+ggscatter(dfs, x = colnames(dfs)[1], y = colnames(dfs)[2],
+					color = "Group",
+					palette = colrs[dfs$Group %>% unique() %>% sort()],
+					label = "labels", repel = T) +
+	scale_y_continuous(breaks = seq(0, max(dfs[, 2]), 0.5)) +
+	scale_x_continuous(breaks = seq(0, max(dfs[, 1]), 0.5)) +
+	geom_hline(yintercept = 1, linetype = "dashed", 
+						 color = "red", size = 1) +
+	geom_vline(xintercept = 1, linetype = "dashed", 
+						 color = "red", size = 1)
+
+###-----------------------------diversity analysis of T Cells------------------###
+sample_colors <- c("IVV-D0" = "#D6D6CEFF",
+									 "IVV-D28" = "#B09C85FF",
+									 "IVV-D42" = "#7E6148FF",
+									 "HD" = "#E64B35FF",
+									 "MP" = "#00A087FF",
+									 "MC" = "#ADE2D0FF",
+									 "SP" = "#3C5488FF",
+									 "sC" = "#8491B4FF"
+)
+
+sample_colors <- c("#D6D6CEFF",
+									 "#B09C85FF",
+									 "#7E6148FF",
+									 "#E64B35FF",
+									 "#00A087FF",
+									 "#ADE2D0FF")[c(1, 6, 2, 5, 3, 4)]
+
+# dat_to_plot <- T_cell_clone_uniq %>% select(barcode, customer_clone, Sex, Groups, Condition, Sampleinfo, IgG) %>% subset(Groups == "Publication" ) %>% unique()
+dat_to_plot <- T_cell_clone_uniq %>% select(barcode, customer_clone, Sex, Groups, Condition, Sampleinfo, IgG) %>% subset(Groups == "Virus" ) %>% unique()
+dat_to_plot$IgG_high_low <- paste0(dat_to_plot$Condition, " ", dat_to_plot$IgG)
+
+sample_curve <- alphaDiversity(dat_to_plot,
+															 group = "IgG_high_low",
+															 clone = "customer_clone",
+															 min_q = 0, max_q = 4, step_q = 0.1,
+															 ci = 0.95, nboot = 200)
+
+plot(sample_curve, colors = sample_colors, main_title = "Vaccination", 
+		 legend_title = "Vaccination")
+
+
+###----------------------------------merged_meta.T_data.txt----------------------------demo data
+"orig.ident"	"SampleID"	"fixed_sample_ID"	"Time_point"	"Patient_name"	"Sex"	"Vaccine_type"	"IgG"	"Batch_new"	"Samples_new"	"Sampleinfo"	"Groups"	"Condition"	"Major_celltype"	"Sample_s"	"barcodes"	"fixed_barcodes"	"cloned_Tcells"	"multiple_clones"	"customer_clone"
+"S1_hashtag_gene_1_AAACCTGAGACGACGT-1"	"S1_1"	NA	"S1"	"A28"	"xxm"	"female"	"Virus"	"High"	"Bei"	"S1_A255"	"S1-A28"	"Virus"	"Virus-A28"	"CD8 TN"	"S1_1"	"AAACCTGAGACGACGT-1"	"S1_1_AAACCTGAGACGACGT-1"	"S1-A28"	"Single"	"TRBV5-6TRBJ2-7CASSTASGRGSYEQYFTRAV8-1TRAJ3CAVNSGYSSASKIIF"
+"S1_hashtag_gene_1_AAACCTGAGATGTGTA-1"	"S1_1"	NA	"S1"	"A0"	"xxm"	"female"	"Virus"	"High"	"Bei"	"S1_A253"	"S1-A0"	"Virus"	"Virus-A0"	"CD4 TCM"	"S1_1"	"AAACCTGAGATGTGTA-1"	"S1_1_AAACCTGAGATGTGTA-1"	"S1-A0"	"Single"	"TRBV5-1TRBJ1-6CASSLAGSWYSPLHFTRAV35TRAJ45CAGQLLPSGGGADGLTF"
+"S1_hashtag_gene_1_AAACCTGAGCGTGTCC-1"	"S1_1"	NA	"S1"	"A0"	"xxm"	"female"	"Virus"	"High"	"Bei"	"S1_A252"	"S1-A0"	"Virus"	"Virus-A0"	"CD4 TN"	"S1_1"	"AAACCTGAGCGTGTCC-1"	"S1_1_AAACCTGAGCGTGTCC-1"	"S1-A0"	"Single"	"TRBV5-1TRBJ2-3CASSLNSRDTQYFTRAV41TRAJ49CAVRTGNQFYF"
+"S1_hashtag_gene_1_AAACCTGAGCTGCAAG-1"	"S1_1"	NA	"S1"	"A0"	"xxm"	"female"	"Virus"	"High"	"Bei"	"S1_A252"	"S1-A0"	"Virus"	"Virus-A0"	"CD4 TN"	"S1_1"	"AAACCTGAGCTGCAAG-1"	"S1_1_AAACCTGAGCTGCAAG-1"	"S1_hashtag_gene_1_AAACCTGAGCTGCAAG-1"	"Not"	"S1_hashtag_gene_1_AAACCTGAGCTGCAAG-1"
+"S1_hashtag_gene_1_AAACCTGAGTACATGA-1"	"S1_1"	NA	"S1"	"A28"	"xxm"	"female"	"Virus"	"High"	"Bei"	"S1_A255"	"S1-A28"	"Virus"	"Virus-A28"	"CD8 TEFF"	"S1_1"	"AAACCTGAGTACATGA-1"	"S1_1_AAACCTGAGTACATGA-1"	"S1-A28"	"Multiple"	"TRBV9TRBJ1-6CASGNSNSPLHFTRAV1-2TRAJ49CAVRSTGNQFYF"
+"S1_hashtag_gene_1_AAACCTGAGTAGCGGT-1"	"S1_1"	NA	"S1"	"A28"	"xxm"	"female"	"Virus"	"High"	"Bei"	"S1_A254"	"S1-A28"	"Virus"	"Virus-A28"	"CD4 TCM"	"S1_1"	"AAACCTGAGTAGCGGT-1"	"S1_1_AAACCTGAGTAGCGGT-1"	"S1-A28"	"Single"	"TRBV7-4TRBJ2-3CAGGQTCTDTQYFTRBV6-1TRBJ2-1CATLGPKAYSYNEQFFTRAV2TRAJ37CAVGGSSNTGKLIF"
+"S1_hashtag_gene_1_AAACCTGAGTATGACA-1"	"S1_1"	NA	"S1"	"A0"	"xxm"	"female"	"Virus"	"High"	"Bei"	"S1_A252"	"S1-A0"	"Virus"	"Virus-A0"	"CD8 TN"	"S1_1"	"AAACCTGAGTATGACA-1"	"S1_1_AAACCTGAGTATGACA-1"	"S1-A0"	"Single"	"TRBV7-3TRBJ1-1CASSGTGTEAFFTRAV3TRAJ43CAVRDLRDMRF"
+"S1_hashtag_gene_1_AAACCTGCAAAGCGGT-1"	"S1_1"	NA	"S1"	"A0"	"xxm"	"female"	"Virus"	"High"	"Bei"	"S1_A253"	"S1-A0"	"Virus"	"Virus-A0"	"CD4 TEFF"	"S1_1"	"AAACCTGCAAAGCGGT-1"	"S1_1_AAACCTGCAAAGCGGT-1"	"S1_hashtag_gene_1_AAACCTGCAAAGCGGT-1"	"Not"	"S1_hashtag_gene_1_AAACCTGCAAAGCGGT-1"
+"S1_hashtag_gene_1_AAACCTGCAGCATACT-1"	"S1_1"	NA	"S1"	"A0"	"xxm"	"female"	"Virus"	"High"	"Bei"	"S1_A252"	"S1-A0"	"Virus"	"Virus-A0"	"CD4 TN"	"S1_1"	"AAACCTGCAGCATACT-1"	"S1_1_AAACCTGCAGCATACT-1"	"S1_hashtag_gene_1_AAACCTGCAGCATACT-1"	"Not"	"S1_hashtag_gene_1_AAACCTGCAGCATACT-1"
+"S1_hashtag_gene_1_AAACCTGCAGGGTATG-1"	"S1_1"	NA	"S1"	"A0"	"xxm"	"female"	"Virus"	"High"	"Bei"	"S1_A252"	"S1-A0"	"Virus"	"Virus-A0"	"CD8 TN"	"S1_1"	"AAACCTGCAGGGTATG-1"	"S1_1_AAACCTGCAGGGTATG-1"	"S1_hashtag_gene_1_AAACCTGCAGGGTATG-1"	"Not"	"S1_hashtag_gene_1_AAACCTGCAGGGTATG-1"
+"S1_hashtag_gene_1_AAACCTGCAGTTTACG-1"	"S1_1"	NA	"S1"	"A28"	"xxm"	"female"	"Virus"	"High"	"Bei"	"S1_A254"	"S1-A28"	"Virus"	"Virus-A28"	"GD T2"	"S1_1"	"AAACCTGCAGTTTACG-1"	"S1_1_AAACCTGCAGTTTACG-1"	"S1_hashtag_gene_1_AAACCTGCAGTTTACG-1"	"Not"	"S1_hashtag_gene_1_AAACCTGCAGTTTACG-1"
+"S1_hashtag_gene_1_AAACCTGCATATGAGA-1"	"S1_1"	NA	"S1"	"A0"	"xxm"	"female"	"Virus"	"High"	"Bei"	"S1_A253"	"S1-A0"	"Virus"	"Virus-A0"	"CD4 TN"	"S1_1"	"AAACCTGCATATGAGA-1"	"S1_1_AAACCTGCATATGAGA-1"	"S1_hashtag_gene_1_AAACCTGCATATGAGA-1"	"Not"	"S1_hashtag_gene_1_AAACCTGCATATGAGA-1"
+"S1_hashtag_gene_1_AAACCTGCATGTCCTC-1"	"S1_1"	NA	"S1"	"A0"	"xxm"	"female"	"Virus"	"High"	"Bei"	"S1_A253"	"S1-A0"	"Virus"	"Virus-A0"	"CD4 TCM"	"S1_1"	"AAACCTGCATGTCCTC-1"	"S1_1_AAACCTGCATGTCCTC-1"	"S1_hashtag_gene_1_AAACCTGCATGTCCTC-1"	"Not"	"S1_hashtag_gene_1_AAACCTGCATGTCCTC-1"
+"S1_hashtag_gene_1_AAACCTGGTAACGACG-1"	"S1_1"	NA	"S1"	"A0"	"xxm"	"female"	"Virus"	"High"	"Bei"	"S1_A252"	"S1-A0"	"Virus"	"Virus-A0"	"CD4 TCM"	"S1_1"	"AAACCTGGTAACGACG-1"	"S1_1_AAACCTGGTAACGACG-1"	"S1_hashtag_gene_1_AAACCTGGTAACGACG-1"	"Not"	"S1_hashtag_gene_1_AAACCTGGTAACGACG-1"
+"S1_hashtag_gene_1_AAACCTGGTACCGTAT-1"	"S1_1"	NA	"S1"	"A0"	"xxm"	"female"	"Virus"	"High"	"Bei"	"S1_A253"	"S1-A0"	"Virus"	"Virus-A0"	"CD4 TN"	"S1_1"	"AAACCTGGTACCGTAT-1"	"S1_1_AAACCTGGTACCGTAT-1"	"S1-A0"	"Single"	"TRBV6-6TRBJ2-2CASSSSGVATGELFFTRBV3-1TRBJ1-1CASSQDYREAFFTRAV12-1TRAJ3CVAQYSSASKIIF"
+"S1_hashtag_gene_1_AAACCTGGTAGCTCCG-1"	"S1_1"	NA	"S1"	"A0"	"xxm"	"female"	"Virus"	"High"	"Bei"	"S1_A252"	"S1-A0"	"Virus"	"Virus-A0"	"CD4 TN"	"S1_1"	"AAACCTGGTAGCTCCG-1"	"S1_1_AAACCTGGTAGCTCCG-1"	"S1-A0"	"Single"	"TRBV20-1TRBJ2-7CSALMGFPEYEQYFTRAV1-2TRAJ23CAVRGQGGKLIF"
+......
+......
+......
+
+###----------------------------------merged_TCR.information_at_least_one_paired_VDJ.txt----------------------------demo data
+"barcode"	"high_confidence"	"length"	"chain"	"v_gene"	"d_gene"	"j_gene"	"c_gene"	"full_length"	"productive"	"fwr1"	"cdr1"	"cdr1_nt"	"fwr2"	"cdr2"	"cdr2_nt"	"fwr3"	"fwr3_nt"	"cdr3"	"cdr3_nt"	"fwr4"	"fwr4_nt"	"reads"	"umis"	"raw_clonotype_id"	"exact_subclonotype_id"	"Sample_s"	"raw_barcode"	"Sampleinfo"	"Vaccine_type"	"Groups"	"IgG"	"Sex"	"Condition"	"Time_point"	"Major_celltype"	"unique_clone"	"customer_clone"	"multiple_clones"	"clone_state"
+"1"	"S1_1_AAACCTGAGACGACGT-1"	"true"	496	"TRB"	"TRBV5-6"	""	"TRBJ2-7"	"TRBC2"	"true"	"true"	"DAGVTQSPTHLIKTRGQQVTLRCSPK"	"SGHDT"	"TCTGGGCATGACACT"	"VSWYQQALGQGPQFIFQ"	"YYEEEE"	"TATTATGAGGAGGAAGAG"	"RQRGNFPDRFSGHQFPNYSSELNVNALLLGDSALYL"	"AGACAGAGAGGCAACTTCCCTGATCGATTCTCAGGTCACCAGTTCCCTAACTATAGCTCTGAGCTGAATGTGAACGCCTTGTTGCTGGGGGACTCGGCCCTCTATCTC"	"CASSTASGRGSYEQYF"	"TGTGCCAGCAGCACCGCTAGCGGGAGGGGCTCCTACGAGCAGTACTTC"	"GPGTRLTVT"	"GGGCCGGGCACCAGGCTCACGGTCACAG"	3330	4	"clonotype14838"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGAGACGACGT-1"	"S1-A28"	"Virus"	"Virus"	"High"	"female"	"Virus-A28"	"A28"	"CD8 TN"	"TRBV5-6TRBJ2-7CASSTASGRGSYEQYF"	"TRBV5-6TRBJ2-7CASSTASGRGSYEQYFTRAV8-1TRAJ3CAVNSGYSSASKIIF"	"Single"	"Single"
+"2"	"S1_1_AAACCTGAGACGACGT-1"	"true"	577	"TRA"	"TRAV8-1"	""	"TRAJ3"	"TRAC"	"true"	"true"	"AQSVSQHNHHVILSEAASLELGCNYS"	"YGGTVN"	"TATGGTGGAACTGTTAAT"	"LFWYVQYPGQHLQLLLK"	"YFSGDPLV"	"TACTTTTCAGGGGATCCACTGGTT"	"KGIKGFEAEFIKSKFSFNLRKPSVQWSDTAEYF"	"AAAGGCATCAAGGGCTTTGAGGCTGAATTTATAAAGAGTAAATTCTCCTTTAATCTGAGGAAACCCTCTGTGCAGTGGAGTGACACAGCTGAGTACTTC"	"CAVNSGYSSASKIIF"	"TGTGCCGTGAATTCGGGGTACAGCAGTGCTTCCAAGATAATCTTT"	"GSGTRLSIRP"	"GGATCAGGGACCAGACTCAGCATCCGGCCAA"	9958	10	"clonotype14838"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGAGACGACGT-1"	"S1-A28"	"Virus"	"Virus"	"High"	"female"	"Virus-A28"	"A28"	"CD8 TN"	"TRAV8-1TRAJ3CAVNSGYSSASKIIF"	"TRBV5-6TRBJ2-7CASSTASGRGSYEQYFTRAV8-1TRAJ3CAVNSGYSSASKIIF"	"Single"	"Single"
+"5"	"S1_1_AAACCTGAGATGTGTA-1"	"true"	502	"TRB"	"TRBV5-1"	""	"TRBJ1-6"	"TRBC1"	"true"	"true"	"KAGVTQTPRYLIKTRGQQVTLSCSPI"	"SGHRS"	"TCTGGGCATAGGAGT"	"VSWYQQTPGQGLQFLFE"	"YFSETQ"	"TACTTCAGTGAGACACAG"	"RNKGNFPGRFSGRQFSNSRSEMNVSTLELGDSALYL"	"AGAAACAAAGGAAACTTCCCTGGTCGATTCTCAGGGCGCCAGTTCTCTAACTCTCGCTCTGAGATGAATGTGAGCACCTTGGAGCTGGGGGACTCGGCCCTTTATCTT"	"CASSLAGSWYSPLHF"	"TGCGCCAGCAGCTTGGCGGGTAGTTGGTATTCACCCCTCCACTTT"	"GNGTRLTVT"	"GGGAATGGGACCAGGCTCACTGTGACAG"	5278	3	"clonotype12254"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGAGATGTGTA-1"	"S1-A0"	"Virus"	"Virus"	"High"	"female"	"Virus-A0"	"A0"	"CD4 TCM"	"TRBV5-1TRBJ1-6CASSLAGSWYSPLHF"	"TRBV5-1TRBJ1-6CASSLAGSWYSPLHFTRAV35TRAJ45CAGQLLPSGGGADGLTF"	"Single"	"Single"
+"6"	"S1_1_AAACCTGAGATGTGTA-1"	"true"	518	"TRA"	"TRAV35"	""	"TRAJ45"	"TRAC"	"true"	"true"	"GQQLNQSPQSMFIQEGEDVSMNCTSS"	"SIFNT"	"AGCATATTTAACACC"	"WLWYKQDPGEGPVLLIA"	"LYKAGEL"	"TTATATAAGGCTGGTGAATTG"	"TSNGRLTAQFGITRKDSFLNISASIPSDVGIYF"	"ACCTCAAATGGAAGACTGACTGCTCAGTTTGGTATAACCAGAAAGGACAGCTTCCTGAATATCTCAGCATCCATACCTAGTGATGTAGGCATCTACTTC"	"CAGQLLPSGGGADGLTF"	"TGTGCTGGGCAGCTCCTCCCTTCAGGAGGAGGTGCTGACGGACTCACCTTT"	"GKGTHLIIQP"	"GGCAAAGGGACTCATCTAATCATCCAGCCCT"	422	2	"clonotype12254"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGAGATGTGTA-1"	"S1-A0"	"Virus"	"Virus"	"High"	"female"	"Virus-A0"	"A0"	"CD4 TCM"	"TRAV35TRAJ45CAGQLLPSGGGADGLTF"	"TRBV5-1TRBJ1-6CASSLAGSWYSPLHFTRAV35TRAJ45CAGQLLPSGGGADGLTF"	"Single"	"Single"
+"7"	"S1_1_AAACCTGAGCGTGTCC-1"	"true"	505	"TRB"	"TRBV5-1"	""	"TRBJ2-3"	"TRBC2"	"true"	"true"	"KAGVTQTPRYLIKTRGQQVTLSCSPI"	"SGHRS"	"TCTGGGCATAGGAGT"	"VSWYQQTPGQGLQFLFE"	"YFSETQ"	"TACTTCAGTGAGACACAG"	"RNKGNFPGRFSGRQFSNSRSEMNVSTLELGDSALYL"	"AGAAACAAAGGAAACTTCCCTGGTCGATTCTCAGGGCGCCAGTTCTCTAACTCTCGCTCTGAGATGAATGTGAGCACCTTGGAGCTGGGGGACTCGGCCCTTTATCTT"	"CASSLNSRDTQYF"	"TGCGCCAGCAGCTTGAACTCGAGGGATACGCAGTATTTT"	"GPGTRLTVL"	"GGCCCAGGCACCCGGCTGACAGTGCTCG"	15796	14	"clonotype4755"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGAGCGTGTCC-1"	"S1-A0"	"Virus"	"Virus"	"High"	"female"	"Virus-A0"	"A0"	"CD4 TN"	"TRBV5-1TRBJ2-3CASSLNSRDTQYF"	"TRBV5-1TRBJ2-3CASSLNSRDTQYFTRAV41TRAJ49CAVRTGNQFYF"	"Single"	"Single"
+"8"	"S1_1_AAACCTGAGCGTGTCC-1"	"true"	541	"TRA"	"TRAV41"	""	"TRAJ49"	"TRAC"	"true"	"true"	"KNEVEQSPQNLTAQEGEFITINCSYS"	"VGISA"	"GTAGGAATAAGTGCC"	"LHWLQQHPGGGIVSLFM"	"LSSGK"	"CTGAGCTCAGGGAAG"	"KKHGRLIATINIQEKHSSLHITASHPRDSAVYI"	"AAGAAGCATGGAAGATTAATTGCCACAATAAACATACAGGAAAAGCACAGCTCCCTGCACATCACAGCCTCCCATCCCAGAGACTCTGCCGTCTACATC"	"CAVRTGNQFYF"	"TGTGCTGTCAGAACCGGTAACCAGTTCTATTTT"	"GTGTSLTVIP"	"GGGACAGGGACAAGTTTGACGGTCATTCCAA"	4158	4	"clonotype4755"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGAGCGTGTCC-1"	"S1-A0"	"Virus"	"Virus"	"High"	"female"	"Virus-A0"	"A0"	"CD4 TN"	"TRAV41TRAJ49CAVRTGNQFYF"	"TRBV5-1TRBJ2-3CASSLNSRDTQYFTRAV41TRAJ49CAVRTGNQFYF"	"Single"	"Single"
+"12"	"S1_1_AAACCTGAGTACATGA-1"	"true"	490	"TRB"	"TRBV9"	""	"TRBJ1-6"	"TRBC1"	"true"	"true"	"DSGVTQTPKHLITATGQRVTLRCSPR"	"SGDLS"	"TCTGGAGACCTCTCT"	"VYWYQQSLDQGLQFLIQ"	"YYNGEE"	"TATTATAATGGAGAAGAG"	"RAKGNILERFSAQQFPDLHSELNLSSLELGDSALYF"	"AGAGCAAAAGGAAACATTCTTGAACGATTCTCCGCACAACAGTTCCCTGACTTGCACTCTGAACTAAACCTGAGCTCTCTGGAGCTGGGGGACTCAGCTTTGTATTTC"	"CASGNSNSPLHF"	"TGTGCCAGCGGCAACAGTAATTCACCCCTCCACTTT"	"GNGTRLTVT"	"GGGAACGGGACCAGGCTCACTGTGACAG"	17354	15	"clonotype6"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGAGTACATGA-1"	"S1-A28"	"Virus"	"Virus"	"High"	"female"	"Virus-A28"	"A28"	"CD8 TEFF"	"TRBV9TRBJ1-6CASGNSNSPLHF"	"TRBV9TRBJ1-6CASGNSNSPLHFTRAV1-2TRAJ49CAVRSTGNQFYF"	"Multiple"	"2-10"
+"13"	"S1_1_AAACCTGAGTACATGA-1"	"true"	505	"TRA"	"TRAV1-2"	""	"TRAJ49"	"TRAC"	"true"	"true"	"GQNIDQPTEMTATEGAIVQINCTYQ"	"TSGFNG"	"ACATCTGGGTTCAACGGG"	"LFWYQQHAGEAPTFLSY"	"NVLDGL"	"AATGTTCTGGATGGTTTG"	"EEKGRFSSFLSRSKGYSYLLLKELQMKDSASYL"	"GAGGAGAAAGGTCGTTTTTCTTCATTCCTTAGTCGGTCTAAAGGGTACAGTTACCTCCTTTTGAAGGAGCTCCAGATGAAAGACTCTGCCTCTTACCTC"	"CAVRSTGNQFYF"	"TGTGCTGTGAGATCCACCGGTAACCAGTTCTATTTT"	"GTGTSLTVIP"	"GGGACAGGGACAAGTTTGACGGTCATTCCAA"	2774	2	"clonotype6"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGAGTACATGA-1"	"S1-A28"	"Virus"	"Virus"	"High"	"female"	"Virus-A28"	"A28"	"CD8 TEFF"	"TRAV1-2TRAJ49CAVRSTGNQFYF"	"TRBV9TRBJ1-6CASGNSNSPLHFTRAV1-2TRAJ49CAVRSTGNQFYF"	"Multiple"	"2-10"
+"14"	"S1_1_AAACCTGAGTAGCGGT-1"	"true"	457	"TRA"	"TRAV2"	""	"TRAJ37"	"TRAC"	"true"	"true"	"KDQVFQPSTVASSEGAVVEIFCNHS"	"VSNAYN"	"GTGTCCAATGCTTACAAC"	"FFWYLHFPGCAPRLLVK"	"GSKP"	"GGCTCAAAGCCT"	"SQQGRYNMTYERFSSSLLILQVREADAAVYY"	"TCTCAGCAGGGACGATACAACATGACCTATGAACGGTTCTCTTCATCGCTGCTCATCCTCCAGGTGCGGGAGGCAGATGCTGCTGTTTACTAC"	"CAVGGSSNTGKLIF"	"TGTGCTGTGGGAGGCTCTAGCAACACAGGCAAACTAATCTTT"	"GQGTTLQVKP"	"GGGCAAGGGACAACTTTACAAGTAAAACCAG"	2410	2	"clonotype8542"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGAGTAGCGGT-1"	"S1-A28"	"Virus"	"Virus"	"High"	"female"	"Virus-A28"	"A28"	"CD4 TCM"	"TRAV2TRAJ37CAVGGSSNTGKLIF"	"TRBV7-4TRBJ2-3CAGGQTCTDTQYFTRBV6-1TRBJ2-1CATLGPKAYSYNEQFFTRAV2TRAJ37CAVGGSSNTGKLIF"	"Single"	"Single"
+"15"	"S1_1_AAACCTGAGTAGCGGT-1"	"true"	512	"TRB"	"TRBV6-1"	""	"TRBJ2-1"	"TRBC2"	"true"	"true"	"NAGVTQTPKFQVLKTGQSMTLQCAQD"	"MNHNS"	"ATGAACCATAACTCC"	"MYWYRQDPGMGLRLIYY"	"SASEGT"	"TCAGCTTCTGAGGGTACC"	"TDKGEVPNGYNVSRLNKREFSLRLESAAPSQTSVYF"	"ACTGACAAAGGAGAAGTCCCCAATGGCTACAATGTCTCCAGATTAAACAAACGGGAGTTCTCGCTCAGGCTGGAGTCGGCTGCTCCCTCCCAGACATCTGTGTACTTC"	"CATLGPKAYSYNEQFF"	"TGTGCCACCCTCGGCCCCAAGGCTTATTCCTACAATGAGCAGTTCTTC"	"GPGTRLTVL"	"GGGCCAGGGACACGGCTCACCGTGCTAG"	13710	10	"clonotype8542"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGAGTAGCGGT-1"	"S1-A28"	"Virus"	"Virus"	"High"	"female"	"Virus-A28"	"A28"	"CD4 TCM"	"TRBV6-1TRBJ2-1CATLGPKAYSYNEQFF"	"TRBV7-4TRBJ2-3CAGGQTCTDTQYFTRBV6-1TRBJ2-1CATLGPKAYSYNEQFFTRAV2TRAJ37CAVGGSSNTGKLIF"	"Single"	"Single"
+"16"	"S1_1_AAACCTGAGTAGCGGT-1"	"true"	475	"TRB"	"TRBV7-4"	""	"TRBJ2-3"	"TRBC2"	"true"	"true"	"GAGVSQSPRYKVAKRGRDVALRCDSI"	"SGHVT"	"TCGGGTCATGTAACC"	"LYWYRQTLGQGSEVLTY"	"SQSDAQ"	"TCCCAGAGTGATGCTCAA"	"RDKSGRPSGRFSAERPERSVSTLKIQRTEQGDSAVYL"	"CGAGACAAATCAGGGCGGCCCAGTGGTCGGTTCTCTGCAGAGAGGCCTGAGAGATCCGTCTCCACTCTGAAGATCCAGCGCACAGAGCAGGGGGACTCAGCTGTGTATCTC"	"CAGGQTCTDTQYF"	"TGTGCCGGGGGACAGACCTGCACAGATACGCAGTATTTT"	"GPGTRLTVL"	"GGCCCAGGCACCCGGCTGACAGTGCTCG"	17868	13	"clonotype8542"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGAGTAGCGGT-1"	"S1-A28"	"Virus"	"Virus"	"High"	"female"	"Virus-A28"	"A28"	"CD4 TCM"	"TRBV7-4TRBJ2-3CAGGQTCTDTQYF"	"TRBV7-4TRBJ2-3CAGGQTCTDTQYFTRBV6-1TRBJ2-1CATLGPKAYSYNEQFFTRAV2TRAJ37CAVGGSSNTGKLIF"	"Single"	"Single"
+"17"	"S1_1_AAACCTGAGTATGACA-1"	"true"	609	"TRA"	"TRAV3"	""	"TRAJ43"	"TRAC"	"true"	"true"	"AQSVAQPEDQVNVAEGNPLTVKCTYS"	"VSGNPY"	"GTCTCTGGAAACCCTTAT"	"LFWYVQYPNRGLQFLLK"	"YITGDNLV"	"TACATCACAGGGGATAACCTGGTT"	"KGSYGFEAEFNKSQTSFHLKKPSALVSDSALYF"	"AAAGGCAGCTATGGCTTTGAAGCTGAATTTAACAAGAGCCAAACCTCCTTCCACCTGAAGAAACCATCTGCCCTTGTGAGCGACTCCGCTTTGTACTTC"	"CAVRDLRDMRF"	"TGTGCTGTGAGAGACCTACGGGACATGCGCTTT"	"GAGTRLTVKP"	"GGAGCAGGGACCAGACTGACAGTAAAACCAA"	744	1	"clonotype172"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGAGTATGACA-1"	"S1-A0"	"Virus"	"Virus"	"High"	"female"	"Virus-A0"	"A0"	"CD8 TN"	"TRAV3TRAJ43CAVRDLRDMRF"	"TRBV7-3TRBJ1-1CASSGTGTEAFFTRAV3TRAJ43CAVRDLRDMRF"	"Single"	"Single"
+"18"	"S1_1_AAACCTGAGTATGACA-1"	"true"	465	"TRB"	"TRBV7-3"	"TRBD1"	"TRBJ1-1"	"TRBC1"	"true"	"true"	"GAGVSQTPSNKVTEKGKYVELRCDPI"	"SGHTA"	"TCAGGTCATACTGCC"	"LYWYRQSLGQGPEFLIY"	"FQGTGA"	"TTCCAAGGCACGGGTGCG"	"ADDSGLPNDRFFAVRPEGSVSTLKIQRTERGDSAVYL"	"GCAGATGACTCAGGGCTGCCCAACGATCGGTTCTTTGCAGTCAGGCCTGAGGGATCCGTCTCTACTCTGAAGATCCAGCGCACAGAGCGGGGGGACTCAGCCGTGTATCTC"	"CASSGTGTEAFF"	"TGTGCCAGCTCCGGGACAGGGACTGAAGCTTTCTTT"	"GQGTRLTVV"	"GGACAAGGCACCAGACTCACAGTTGTAG"	6974	5	"clonotype172"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGAGTATGACA-1"	"S1-A0"	"Virus"	"Virus"	"High"	"female"	"Virus-A0"	"A0"	"CD8 TN"	"TRBV7-3TRBJ1-1CASSGTGTEAFF"	"TRBV7-3TRBJ1-1CASSGTGTEAFFTRAV3TRAJ43CAVRDLRDMRF"	"Single"	"Single"
+"27"	"S1_1_AAACCTGGTACCGTAT-1"	"true"	490	"TRB"	"TRBV3-1"	""	"TRBJ1-1"	"TRBC1"	"true"	"true"	"DTAVSQTPKYLVTQMGNDKSIKCEQN"	"LGHDT"	"CTGGGCCATGATACT"	"MYWYKQDSKKFLKIMFS"	"YNNKEL"	"TACAATAATAAGGAGCTC"	"IINETVPNRFSPKSPDKAHLNLHINSLELGDSAVYF"	"ATTATAAATGAAACAGTTCCAAATCGCTTCTCACCTAAATCTCCAGACAAAGCTCACTTAAATCTTCACATCAATTCCCTGGAGCTTGGTGACTCTGCTGTGTATTTC"	"CASSQDYREAFF"	"TGTGCCAGCAGCCAAGATTACAGGGAAGCTTTCTTT"	"GQGTRLTVV"	"GGACAAGGCACCAGACTCACAGTTGTAG"	11854	9	"clonotype2882"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGGTACCGTAT-1"	"S1-A0"	"Virus"	"Virus"	"High"	"female"	"Virus-A0"	"A0"	"CD4 TN"	"TRBV3-1TRBJ1-1CASSQDYREAFF"	"TRBV6-6TRBJ2-2CASSSSGVATGELFFTRBV3-1TRBJ1-1CASSQDYREAFFTRAV12-1TRAJ3CVAQYSSASKIIF"	"Single"	"Single"
+"28"	"S1_1_AAACCTGGTACCGTAT-1"	"true"	495	"TRA"	"TRAV12-1"	""	"TRAJ3"	"TRAC"	"true"	"true"	"RKEVEQDPGPFNVPEGATVAFNCTYS"	"NSASQS"	"AACAGTGCTTCTCAGTCT"	"FFWYRQDCRKEPKLLMS"	"VYSSG"	"GTATACTCCAGTGGT"	"NEDGRFTAQLNRASQYISLLIRDSKLSDSATYL"	"AATGAAGATGGAAGGTTTACAGCACAGCTCAATAGAGCCAGCCAGTATATTTCCCTGCTCATCAGAGACTCCAAGCTCAGTGATTCAGCCACCTACCTC"	"CVAQYSSASKIIF"	"TGTGTGGCCCAGTACAGCAGTGCTTCCAAGATAATCTTT"	"GSGTRLSIRP"	"GGATCAGGGACCAGACTCAGCATCCGGCCAA"	2366	2	"clonotype2882"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGGTACCGTAT-1"	"S1-A0"	"Virus"	"Virus"	"High"	"female"	"Virus-A0"	"A0"	"CD4 TN"	"TRAV12-1TRAJ3CVAQYSSASKIIF"	"TRBV6-6TRBJ2-2CASSSSGVATGELFFTRBV3-1TRBJ1-1CASSQDYREAFFTRAV12-1TRAJ3CVAQYSSASKIIF"	"Single"	"Single"
+"29"	"S1_1_AAACCTGGTACCGTAT-1"	"true"	498	"TRB"	"TRBV6-6"	""	"TRBJ2-2"	"TRBC2"	"true"	"true"	"NAGVTQTPKFRILKIGQSMTLQCAQD"	"MNHNY"	"ATGAACCATAACTAC"	"MYWYRQDPGMGLKLIYY"	"SVGAGI"	"TCAGTTGGTGCTGGTATC"	"TDKGEVPNGYNVSRSTTEDFPLRLELAAPSQTSVYF"	"ACTGACAAAGGAGAAGTCCCGAATGGCTACAACGTCTCCAGATCAACCACAGAGGATTTCCCGCTCAGGCTGGAGTTGGCTGCTCCCTCCCAGACATCTGTGTACTTC"	"CASSSSGVATGELFF"	"TGTGCCAGCAGTTCTAGCGGGGTGGCCACCGGGGAGCTGTTTTTT"	"GEGSRLTVL"	"GGAGAAGGCTCTAGGCTGACCGTACTGG"	9830	8	"clonotype2882"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGGTACCGTAT-1"	"S1-A0"	"Virus"	"Virus"	"High"	"female"	"Virus-A0"	"A0"	"CD4 TN"	"TRBV6-6TRBJ2-2CASSSSGVATGELFF"	"TRBV6-6TRBJ2-2CASSSSGVATGELFFTRBV3-1TRBJ1-1CASSQDYREAFFTRAV12-1TRAJ3CVAQYSSASKIIF"	"Single"	"Single"
+"30"	"S1_1_AAACCTGGTAGCTCCG-1"	"true"	505	"TRA"	"TRAV1-2"	""	"TRAJ23"	"TRAC"	"true"	"true"	"GQNIDQPTEMTATEGAIVQINCTYQ"	"TSGFNG"	"ACATCTGGGTTCAACGGG"	"LFWYQQHAGEAPTFLSY"	"NVLDGL"	"AATGTTCTGGATGGTTTG"	"EEKGRFSSFLSRSKGYSYLLLKELQMKDSASYL"	"GAGGAGAAAGGTCGTTTTTCTTCATTCCTTAGTCGGTCTAAAGGGTACAGTTACCTCCTTTTGAAGGAGCTCCAGATGAAAGACTCTGCCTCTTACCTC"	"CAVRGQGGKLIF"	"TGTGCTGTGAGGGGCCAGGGAGGAAAGCTTATCTTC"	"GQGTELSVKP"	"GGACAGGGAACGGAGTTATCTGTGAAACCCA"	1752	5	"clonotype2514"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGGTAGCTCCG-1"	"S1-A0"	"Virus"	"Virus"	"High"	"female"	"Virus-A0"	"A0"	"CD4 TN"	"TRAV1-2TRAJ23CAVRGQGGKLIF"	"TRBV20-1TRBJ2-7CSALMGFPEYEQYFTRAV1-2TRAJ23CAVRGQGGKLIF"	"Single"	"Single"
+"31"	"S1_1_AAACCTGGTAGCTCCG-1"	"true"	521	"TRB"	"TRBV20-1"	""	"TRBJ2-7"	"TRBC2"	"true"	"true"	"GAVVSQHPSRVICKSGTSVKIECRSL"	"DFQATT"	"GACTTTCAGGCCACAACT"	"MFWYRQFPKQSLMLMAT"	"SNEGSKA"	"TCCAATGAGGGCTCCAAGGCC"	"TYEQGVEKDKFLINHASLTLSTLTVTSAHPEDSSFYI"	"ACATACGAGCAAGGCGTCGAGAAGGACAAGTTTCTCATCAACCATGCAAGCCTGACCTTGTCCACTCTGACAGTGACCAGTGCCCATCCTGAAGACAGCAGCTTCTACATC"	"CSALMGFPEYEQYF"	"TGCAGTGCCTTAATGGGATTCCCTGAGTACGAGCAGTACTTC"	"GPGTRLTVT"	"GGGCCGGGCACCAGGCTCACGGTCACAG"	9348	7	"clonotype2514"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGGTAGCTCCG-1"	"S1-A0"	"Virus"	"Virus"	"High"	"female"	"Virus-A0"	"A0"	"CD4 TN"	"TRBV20-1TRBJ2-7CSALMGFPEYEQYF"	"TRBV20-1TRBJ2-7CSALMGFPEYEQYFTRAV1-2TRAJ23CAVRGQGGKLIF"	"Single"	"Single"
+"32"	"S1_1_AAACCTGGTAGTACCT-1"	"true"	484	"TRA"	"TRAV10"	""	"TRAJ27"	"TRAC"	"true"	"true"	"KNQVEQSPQSLIILEGKNCTLQCNYT"	"VSPFSN"	"GTGAGCCCCTTCAGCAAC"	"LRWYKQDTGRGPVSLTI"	"MTFSENT"	"ATGACTTTCAGTGAGAACACA"	"KSNGRYTATLDADTKQSSLHITASQLSDSASYI"	"AAGTCGAACGGAAGATATACAGCAACTCTGGATGCAGACACAAAGCAAAGCTCTCTGCACATCACAGCCTCCCAGCTCAGCGATTCAGCCTCCTACATC"	"CVVSEVDTNAGKSTF"	"TGTGTGGTGAGCGAGGTGGACACCAATGCAGGCAAATCAACCTTT"	"GDGTTLTVKP"	"GGGGATGGGACTACGCTCACTGTGAAGCCAA"	5648	3	"clonotype2"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGGTAGTACCT-1"	"S1-A0"	"Virus"	"Virus"	"High"	"female"	"Virus-A0"	"A0"	"CD8 TEM"	"TRAV10TRAJ27CVVSEVDTNAGKSTF"	"TRBV27TRBJ1-1CASSLGSTGKGTEAFFTRAV14/DV4TRAJ21CAMREWLYNFNKFYFTRAV10TRAJ27CVVSEVDTNAGKSTF"	"Multiple"	"2-10"
+"33"	"S1_1_AAACCTGGTAGTACCT-1"	"true"	498	"TRB"	"TRBV27"	""	"TRBJ1-1"	"TRBC1"	"true"	"true"	"EAQVTQNPRYLITVTGKKLTVTCSQN"	"MNHEY"	"ATGAACCATGAGTAT"	"MSWYRQDPGLGLRQIYY"	"SMNVEV"	"TCAATGAATGTTGAGGTG"	"TDKGDVPEGYKVSRKEKRNFPLILESPSPNQTSLYF"	"ACTGATAAGGGAGATGTTCCTGAAGGGTACAAAGTCTCTCGAAAAGAGAAGAGGAATTTCCCCCTGATCCTGGAGTCGCCCAGCCCCAACCAGACCTCTCTGTACTTC"	"CASSLGSTGKGTEAFF"	"TGTGCCAGCAGTTTAGGCTCAACAGGGAAGGGTACTGAAGCTTTCTTT"	"GQGTRLTVV"	"GGACAAGGCACCAGACTCACAGTTGTAG"	5728	6	"clonotype2"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGGTAGTACCT-1"	"S1-A0"	"Virus"	"Virus"	"High"	"female"	"Virus-A0"	"A0"	"CD8 TEM"	"TRBV27TRBJ1-1CASSLGSTGKGTEAFF"	"TRBV27TRBJ1-1CASSLGSTGKGTEAFFTRAV14/DV4TRAJ21CAMREWLYNFNKFYFTRAV10TRAJ27CVVSEVDTNAGKSTF"	"Multiple"	"2-10"
+"34"	"S1_1_AAACCTGGTAGTACCT-1"	"true"	526	"TRA"	"TRAV14/DV4"	""	"TRAJ21"	"TRAC"	"true"	"true"	"AQKITQTQPGMFVQEKEAVTLDCTYD"	"TSDPSYG"	"ACCAGTGATCCAAGTTATGGT"	"LFWYKQPSSGEMIFLIY"	"QGSYDQQN"	"CAGGGGTCTTATGACCAGCAAAAT"	"ATEGRYSLNFQKARKSANLVISASQLGDSAMYF"	"GCAACAGAAGGTCGCTACTCATTGAATTTCCAGAAGGCAAGAAAATCCGCCAACCTTGTCATCTCCGCTTCACAACTGGGGGACTCAGCAATGTATTTC"	"CAMREWLYNFNKFYF"	"TGTGCAATGAGAGAGTGGCTTTACAACTTCAACAAATTTTACTTT"	"GSGTKLNVKP"	"GGATCTGGGACCAAACTCAATGTAAAACCAA"	5006	4	"clonotype2"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGGTAGTACCT-1"	"S1-A0"	"Virus"	"Virus"	"High"	"female"	"Virus-A0"	"A0"	"CD8 TEM"	"TRAV14/DV4TRAJ21CAMREWLYNFNKFYF"	"TRBV27TRBJ1-1CASSLGSTGKGTEAFFTRAV14/DV4TRAJ21CAMREWLYNFNKFYFTRAV10TRAJ27CVVSEVDTNAGKSTF"	"Multiple"	"2-10"
+"37"	"S1_1_AAACCTGGTCTCATCC-1"	"true"	686	"TRA"	"TRAV8-3"	""	"TRAJ42"	"TRAC"	"true"	"true"	"AQSVTQPDIHITVSEGASLELRCNYS"	"YGATPY"	"TATGGGGCAACACCTTAT"	"LFWYVQSPGQGLQLLLK"	"YFSGDTLV"	"TACTTTTCAGGAGACACTCTGGTT"	"QGIKGFEAEFKRSQSSFNLRKPSVHWSDAAEYF"	"CAAGGCATTAAAGGCTTTGAGGCTGAATTTAAGAGGAGTCAATCTTCCTTCAACCTGAGGAAACCCTCTGTGCATTGGAGTGATGCTGCTGAGTACTTC"	"CAVGPNYGGSQGNLIF"	"TGTGCTGTGGGTCCGAATTATGGAGGAAGCCAAGGAAATCTCATCTTT"	"GKGTKLSVKP"	"GGAAAAGGCACTAAACTCTCTGTTAAACCAA"	3818	3	"clonotype1830"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGGTCTCATCC-1"	"S1-A28"	"Virus"	"Virus"	"High"	"female"	"Virus-A28"	"A28"	"CD4 TCM"	"TRAV8-3TRAJ42CAVGPNYGGSQGNLIF"	"TRBV2TRBJ2-3CASSGNTQYFTRAV8-3TRAJ42CAVGPNYGGSQGNLIF"	"Single"	"Single"
+"38"	"S1_1_AAACCTGGTCTCATCC-1"	"true"	463	"TRB"	"TRBV2"	""	"TRBJ2-3"	"TRBC2"	"true"	"true"	"EPEVTQTPSHQVTQMGQEVILRCVPI"	"SNHLY"	"TCTAATCACTTATAC"	"FYWYRQILGQKVEFLVS"	"FYNNEI"	"TTTTATAATAATGAAATC"	"SEKSEIFDDQFSVERPDGSNFTLKIRSTKLEDSAMYF"	"TCAGAGAAGTCTGAAATATTCGATGATCAATTCTCAGTTGAAAGGCCTGATGGATCAAATTTCACTCTGAAGATCCGGTCCACAAAGCTGGAGGACTCAGCCATGTACTTC"	"CASSGNTQYF"	"TGTGCCAGCAGTGGGAATACGCAGTATTTT"	"GPGTRLTVL"	"GGCCCAGGCACCCGGCTGACAGTGCTCG"	8878	8	"clonotype1830"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGGTCTCATCC-1"	"S1-A28"	"Virus"	"Virus"	"High"	"female"	"Virus-A28"	"A28"	"CD4 TCM"	"TRBV2TRBJ2-3CASSGNTQYF"	"TRBV2TRBJ2-3CASSGNTQYFTRAV8-3TRAJ42CAVGPNYGGSQGNLIF"	"Single"	"Single"
+"43"	"S1_1_AAACCTGTCAGTACGT-1"	"true"	473	"TRB"	"TRBV9"	""	"TRBJ2-2"	"TRBC2"	"true"	"true"	"DSGVTQTPKHLITATGQRVTLRCSPR"	"SGDLS"	"TCTGGAGACCTCTCT"	"VYWYQQSLDQGLQFLIQ"	"YYNGEE"	"TATTATAATGGAGAAGAG"	"RAKGNILERFSAQQFPDLHSELNLSSLELGDSALYF"	"AGAGCAAAAGGAAACATTCTTGAACGATTCTCCGCACAACAGTTCCCTGACTTGCACTCTGAACTAAACCTGAGCTCTCTGGAGCTGGGGGACTCAGCTTTGTATTTC"	"CASSKGGAATGELFF"	"TGTGCCAGCAGCAAAGGTGGGGCTGCCACCGGGGAGCTGTTTTTT"	"GEGSRLTVL"	"GGAGAAGGCTCTAGGCTGACCGTACTGG"	4750	3	"clonotype12287"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGTCAGTACGT-1"	"S1-A28"	"Virus"	"Virus"	"High"	"female"	"Virus-A28"	"A28"	"CD8 TN"	"TRBV9TRBJ2-2CASSKGGAATGELFF"	"TRBV9TRBJ2-2CASSKGGAATGELFFTRAV12-1TRAJ37CVVNSGSGNTGKLIF"	"Single"	"Single"
+"44"	"S1_1_AAACCTGTCAGTACGT-1"	"true"	549	"TRA"	"TRAV12-1"	""	"TRAJ37"	"TRAC"	"true"	"true"	"RKEVEQDPGPFNVPEGATVAFNCTYS"	"NSASQS"	"AACAGTGCTTCTCAGTCT"	"FFWYRQDCRKEPKLLMS"	"VYSSG"	"GTATACTCCAGTGGT"	"NEDGRFTAQLNRASQYISLLIRDSKLSDSATYL"	"AATGAAGATGGAAGGTTTACAGCACAGCTCAATAGAGCCAGCCAGTATATTTCCCTGCTCATCAGAGACTCCAAGCTCAGTGATTCAGCCACCTACCTC"	"CVVNSGSGNTGKLIF"	"TGTGTGGTGAATTCTGGCTCTGGCAACACAGGCAAACTAATCTTT"	"GQGTTLQVKP"	"GGGCAAGGGACAACTTTACAAGTAAAACCAG"	2654	4	"clonotype12287"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGTCAGTACGT-1"	"S1-A28"	"Virus"	"Virus"	"High"	"female"	"Virus-A28"	"A28"	"CD8 TN"	"TRAV12-1TRAJ37CVVNSGSGNTGKLIF"	"TRBV9TRBJ2-2CASSKGGAATGELFFTRAV12-1TRAJ37CVVNSGSGNTGKLIF"	"Single"	"Single"
+......
+......
+......
