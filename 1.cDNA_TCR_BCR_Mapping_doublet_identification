@@ -1,0 +1,134 @@
+###---------------------Step 1. cDNA mapping---------------------------------------------###
+cellranger6 count \
+--force-cells=35000 \
+--id=SAMPLENAME_mapping  \
+--chemistry=SC5P-PE \
+--localcores=16 \
+--transcriptome=/data/home/heshuai/reference_data/refdata-cellranger6-mRNA_vaccine \
+--fastqs=/data4/heshuai/RAW_data/1-SingleCell/21.COV19_vaccine/1.House_in_dat/1.1.Rawdata \
+--sample=SAMPLENAME
+
+###---------------------TCR/BCR mapping------------------------------------------###
+cellranger6 vdj \
+--id=SAMPLENAME \
+--localcores=16  \
+--reference=/data/home/heshuai/reference_data/refdata-cellranger-vdj-GRCh38-alts-ensembl-5.0.0 \
+--fastqs=/data4/heshuai/RAW_data/1-SingleCell/21.COV19_vaccine/1.House_in_dat/1.Rawdata \
+--sample=SAMPLENAME
+
+###-------------------maping for cDNA and hashtag data------------------------------###
+cellranger6 count \
+--force-cells=35000 \
+--id=REPLACE_hashtag_gene  \
+--localcores=16 \
+--libraries=/data4/heshuai/RAW_data/1-SingleCell/21.COV19_vaccine/1.House_in_dat/4.1.Script/Hashtag_library.csv \
+--feature-ref=/data4/heshuai/RAW_data/1-SingleCell/21.COV19_vaccine/1.House_in_dat/4.1.Script/Hashtag_feature_ref.csv \
+--transcriptome=/data/home/heshuai/reference_data/refdata-cellranger6.0-GRCh38_18Y_HBV
+
+###---------------Hashtag_library.csv
+fastqs,sample,library_type
+/data4/heshuai/RAW_data/1-SingleCell/21.COV19_vaccine/1.House_in_dat/1.1.Rawdata,SAMPLENAME_cDNA,Gene Expression
+/data4/heshuai/RAW_data/1-SingleCell/21.COV19_vaccine/1.House_in_dat/1.1.Rawdata,SAMPLENAME_hash,Antibody Capture
+
+###---------------Hashtag_feature_ref.csv
+id,name,read,pattern,sequence,feature_type
+HASHTAG251,A251,R2,5PNNNNNNNNNN(BC),GTCAACTCTTTAGCG,Antibody Capture
+HASHTAG252,A252,R2,5PNNNNNNNNNN(BC),TGATGGCCTATTGGG,Antibody Capture
+HASHTAG253,A253,R2,5PNNNNNNNNNN(BC),TTCCGCCTCTCTTTG,Antibody Capture
+HASHTAG254,A254,R2,5PNNNNNNNNNN(BC),AGTAAGTTCAGCGTA,Antibody Capture
+HASHTAG255,A255,R2,5PNNNNNNNNNN(BC),AAGTATCGTTTCGCA,Antibody Capture
+HASHTAG256,A256,R2,5PNNNNNNNNNN(BC),GGTTGCCAGATGTCA,Antibody Capture
+HASHTAG257,A257,R2,5PNNNNNNNNNN(BC),TGTCTTTCCTGCCAG,Antibody Capture
+HASHTAG258,A258,R2,5PNNNNNNNNNN(BC),CTCCTCTGCAATTAC,Antibody Capture
+HASHTAG259,A259,R2,5PNNNNNNNNNN(BC),CAGTAGTCACGGTCA,Antibody Capture
+HASHTAG260,A260,R2,5PNNNNNNNNNN(BC),ATTGACCCGCGTTAG,Antibody Capture
+
+###---------------------------------------------Step 2. Split cells according to the expression of antibody----------------------------### (R Script)
+packages <- list("Seurat", "Matrix", "stringr", "stringi", "ggplot2", "plyr", "ggthemes", "cowplot", "data.table", "SeuratData", "SeuratDisk", "future", "ggsci")
+lapply(packages, library, character.only = TRUE)
+
+options(future.globals.maxSize = 100*1000 * 1024^2)
+plan("multiprocess", workers = 20)
+plan()
+
+color_used <- c(pal_npg()(10),pal_igv()(9),pal_uchicago("light")(9),pal_futurama()(12), pal_aaas()(10))[-8]
+###-----------------------------hashtag demultiplex----------------------------###
+Seurat_object <- Read10X("Path/outs/filtered_feature_bc_matrix")
+tmp <- Seurat_object
+Seurat_object <- CreateSeuratObject(tmp$"Gene Expression", project = "Sample", min.cells = 1, min.features = 0)
+
+mito.features <- grep(pattern = "^MT-", x = rownames(x = Seurat_object), value = TRUE)
+percent.mito <- Matrix::colSums(x = GetAssayData(object = Seurat_object, slot = 'counts')[mito.features, ]) / Matrix::colSums(x = GetAssayData(object = Seurat_object, slot = 'counts'))
+TenXdat <- Seurat_object
+Seurat_object[["percent.mito"]] <- percent.mito
+Seurat_object <- subset(x = Seurat_object, subset = nFeature_RNA >= 500 & nFeature_RNA < 5000 & percent.mito <= 0.10 & nCount_RNA >= 1000 & nCount_RNA <= 25000)
+Seurat_object@meta.data %>% row.names %>% write.table(file = "Sample.RData"), col.names = F, row.names = F, sep = "\t")
+
+S5_hashtag_gene <- TenXdat
+save(list = "S5_hashtag_gene", file = "S5_hashtag_gene_singlet.RData")
+###------------------ cells identification------------------###
+load("S5_hashtag_gene_singlet.RData")
+cells <- read.table("Sample.RData"), header = F, row.names = NULL, sep = "\t", stringsAsFactors = F)
+
+pbmc.umis <- tmp$'Gene Expression'
+pbmc.htos <- tmp$'Antibody Capture'
+
+# Select cell barcodes detected by both RNA and HTO In the example datasets we have already
+# filtered the cells for you, but perform this step for clarity.
+joint.bcs <- Reduce(intersect, x = list(colnames(pbmc.umis), colnames(pbmc.htos), cells$V1))
+
+# Subset RNA and HTO counts by joint cell barcodes
+pbmc.umis <- pbmc.umis[, joint.bcs]
+pbmc.htos <- as.matrix(pbmc.htos[names((pbmc.htos %>% rowSums() )> 100)[(pbmc.htos %>% rowSums() )> 100], joint.bcs])
+
+pbmc.hashtag <- CreateSeuratObject(counts = pbmc.umis)
+
+# Normalize RNA data with log normalization
+pbmc.hashtag <- NormalizeData(pbmc.hashtag)
+# Find and scale variable features
+pbmc.hashtag <- FindVariableFeatures(pbmc.hashtag, nfeatures = 2000, selection.method = 'mean.var.plot', mean.cutoff = c(0.1, Inf), dispersion.cutoff = c(0.5, Inf))
+pbmc.hashtag <- ScaleData(pbmc.hashtag, features = VariableFeatures(pbmc.hashtag))
+
+pbmc.hashtag[["HTO"]] <- CreateAssayObject(counts = pbmc.htos)
+# Normalize HTO data, here we use centered log-ratio (CLR) transformation
+pbmc.hashtag <- NormalizeData(pbmc.hashtag, assay = "HTO", normalization.method = "CLR", margin = 2 )
+
+## Demultiplex cells based on HTO enrichment
+pbmc.hashtag <- HTODemux(pbmc.hashtag, assay = "HTO", positive.quantile = 0.99)
+
+##--------------------singlet cell extraction--------------------###libr  
+pbmc.hashtag.singlet_cells <- subset(pbmc.hashtag, idents = "Singlet")
+save(list = pbmc.hashtag.singlet_cells, file = paste0("Sample_singlet.RData"))
+
+###--------------Convert Seurat object to h5ad------------------###
+library(SeuratData)
+library(SeuratDisk)
+
+SaveH5Seurat(pbmc.hashtag.singlet_cells, filename = "Sample.h5Seurat")
+Convert("Sample.h5Seurat", dest = "h5ad")
+
+###-----------------------------------Step 3. Doublet identification--------------------------------------------### (Python Script)
+import skimage
+import os
+import scrublet
+import sys
+import scanpy
+
+args = sys.argv
+adata = scanpy.read_h5ad("/data4/heshuai/RAW_data/1-SingleCell/21.COV19_vaccine/1.House_in_dat/3.Analysis/Sample.h5ad")
+scanpy.external.pp.scrublet(adata,  expected_doublet_rate = 0.06)
+adata.obs.to_csv("Sample_dobulets.txt", sep='\t')
+
+
+
+
+
+
+
+
+
+
+
+
+
+
