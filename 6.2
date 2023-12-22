@@ -1,0 +1,408 @@
+library(Seurat)
+library(ggpubr)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(ggthemes)
+library(cowplot)
+library(data.table)
+library(parallel)
+library(RColorBrewer)
+library(pheatmap)
+library(tidyr)
+library(readr)
+library(cba)
+library(Startrac)
+library(ggsci)
+library(igraph)
+library(sigminer)
+library(VennDiagram)
+library(ggtern)
+library(scales)
+library(alakazam)
+library(shazam)
+library(ggalluvial)
+options(ggrepel.max.overlaps = Inf)
+
+#######################################--------------------------------------################################
+color_used <- c(pal_npg()(10),pal_igv()(9),pal_uchicago("light")(9),pal_futurama()(12), pal_aaas()(10), pal_jama()(7))[-8]
+condition_colors <- c("#E64B35FF", "#00A087FF", "#ADE2D0FF", "#3C5488FF", "#8491B4FF", "#D6D6CEFF", "#B09C85FF", "#7E6148FF")[c(6:8, 1:5)]
+
+merged_meta.data <- read.table("merged_meta.B_data.txt", header = T, row.names = 1, sep = "\t")
+B_cell_clone_uniq <- read.table(file = "merged_BCR.information_at_least_one_paired_VDJ.txt", sep = "\t", header = T, row.names = 1, stringsAsFactors = F)
+
+###----------------plot the detectable TCR cells----------------------------###
+df_for_plot <- merged_meta.data %>%
+  dplyr::select(fixed_barcodes, Sample_s, Condition, multiple_clones, customer_clone, Patient_name, Major_celltype)
+
+df_for_plot$Major_celltype <- factor(df_for_plot$Major_celltype,
+                                                       levels = c(df_for_plot$Major_celltype %>% table %>% sort %>% names))
+
+df_for_plot$multiple_clones <- factor(df_for_plot$multiple_clones, levels = rev(c("Multiple", "Single", "Not")))
+
+cols <- c(rgb2hex(r = 213, g = 234, b = 205), rgb2hex(r = 132, g = 197, b = 134), rgb2hex(r = 48, g = 154, b = 78))
+
+ggplot(df_for_plot, aes(x = Major_celltype,  fill = multiple_clones)) + 
+  geom_bar(position = "stack", width = 0.9) +
+  scale_y_continuous(expand = c(0, 1000), breaks = seq(0, 40000, by = 10000L)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  labs(x = "Sample",
+       y = "Number of cells") +
+  coord_flip() +
+  scale_fill_discrete(breaks = c('Multiple', 'Single', 'Not')) +
+  scale_fill_manual(values = (cols)) + 
+  theme_classic()
+
+###----------------plot the clone state of TCR cells----------------------------###
+B_cell_clone_uniq$clone_state <- factor(B_cell_clone_uniq$clone_state, levels = rev(c("Single", "2-10", "10-50", "50-100", "100-200", ">200")))
+
+B_cell_clone_uniq$Condition <- B_cell_clone_uniq$Condition %>%
+  as.character %>%
+  gsub(pattern = "control-control-", replacement = "HD") %>% 
+  gsub(pattern = "mild/moderate-progression-", replacement = "MP") %>% 
+  gsub(pattern = "mild/moderate-convalescence-", replacement = "MC") %>% 
+  gsub(pattern = "severe/critical-progression-", replacement = "SP") %>% 
+  gsub(pattern = "severe/critical-convalescence-", replacement = "SC") %>% 
+  gsub(pattern = "Virus-A0", replacement = "IVV-D0") %>% 
+  gsub(pattern = "Virus-A28", replacement = "IVV-D28") %>% 
+  gsub(pattern = "Virus-A42", replacement = "IVV-D42") %>%
+  gsub(pattern = "A42-A28", replacement = "D42-D28")
+
+B_cell_clone_uniq$Condition <- factor(B_cell_clone_uniq$Condition %>% as.character(),
+                                      levels = c("IVV-D0",
+                                                 "IVV-D28",
+                                                 "IVV-D42",
+                                                 "HD",
+                                                 "MP",
+                                                 "MC",
+                                                 "SP",
+                                                 "SC"))
+
+cols1 <- c(rgb2hex(r = 96, g = 12, b = 22), rgb2hex(r = 245, g = 207, b = 193))
+# Basic piechart
+dat_to_plot <- B_cell_clone_uniq %>% dplyr::select(barcode, customer_clone, Sex, Groups, Condition, Sampleinfo, clone_state, IgG) %>% unique()
+dat_to_plot$customer_clone <- paste0(dat_to_plot$customer_clone, dat_to_plot$Sampleinfo)
+
+df1 <- dat_to_plot %>% subset(c(Groups != "Virus")) %>% dplyr::select(clone_state, Condition, IgG)
+
+ggplot(df1, aes(x = Condition, fill = clone_state)) +
+  geom_bar(position = "fill", width = 0.99, color = "white") +
+  coord_polar("y", start = 0) +
+  # facet_grid( ~ IgG) +
+  scale_fill_manual(values = rev(c("#309a4e", colorRampPalette(brewer_pal(palette="YlOrRd")(9)[c(3, 8)])(5))[1:(df1$clone_state %>% unique %>% length)])) + 
+  theme_classic() +
+  theme(#legend.position="none",
+    axis.title = element_blank(),
+    axis.text = element_blank()) +
+  labs(title = "")
+
+###---------------------clonity and diversity evaluation-------------------------------##
+sample_colors <- c("IVV-D0" = "#D6D6CEFF",
+                   "IVV-D28" = "#B09C85FF",
+                   "IVV-D42" = "#7E6148FF",
+                   "HD" = "#E64B35FF",
+                   "MP" = "#00A087FF",
+                   "MC" = "#ADE2D0FF",
+                   "SP" = "#3C5488FF",
+                   "sC" = "#8491B4FF"
+)
+
+sample_colors <- c("#D6D6CEFF",
+                   "#B09C85FF",
+                   "#7E6148FF",
+                   "#E64B35FF",
+                   "#00A087FF",
+                   "#ADE2D0FF")[c(1, 6, 2, 5, 3, 4)]
+
+# dat_to_plot <- T_cell_clone_uniq %>% select(barcode, customer_clone, Sex, Groups, Condition, Sampleinfo, IgG) %>% subset(Groups == "Publication" ) %>% unique()
+dat_to_plot <- B_cell_clone_uniq %>% dplyr::select(barcode, customer_clone, Sex, Groups, Condition, Sampleinfo, IgG) %>% subset(Groups != "Virus" ) %>% unique()
+dat_to_plot$IgG_high_low <- paste0(dat_to_plot$Condition, " ", dat_to_plot$IgG)
+
+sample_curve <- alphaDiversity(dat_to_plot,
+                               group = "Condition",
+                               clone = "customer_clone",
+                               min_q = 0, max_q = 4, step_q = 0.1,
+                               ci = 0.95, nboot = 200)
+
+plot(sample_curve, colors = sample_colors[], main_title = "Vaccination", 
+     legend_title = "Vaccination")
+####----------------------------------------calculate the useage of VDJ genes---------------------------------------------------####
+df_for_VDJ <- B_cell_clone_uniq %>%
+  dplyr::select(barcode, chain, Condition, clone_state, customer_clone, Major_celltype, v_gene, j_gene, Groups, IgG)
+
+Odd_calculation <- function(Chain, Group, IgG1 = "All"){
+  if(Chain == "IGH" &  IgG1 == "All"){
+    print("All IGH")
+    df_for_VDJ_Hchain <- df_for_VDJ %>% subset(chain == "IGH" & Groups == Group) %>% mutate(V_J_pairs = paste0(v_gene, "_", j_gene))
+  } else if(Chain != "IGH" & IgG1 == "All"){
+    print(Chain)
+    df_for_VDJ_Hchain <- df_for_VDJ %>% subset(chain != "IGH" & Groups == Group) %>% mutate(V_J_pairs = paste0(v_gene, "_", j_gene))
+  } else if(Chain == "IGH" & IgG1 != "All"){
+    df_for_VDJ_Hchain <- df_for_VDJ %>% subset(chain == "IGH" & Groups == Group & IgG == IgG1) %>% mutate(V_J_pairs = paste0(v_gene, "_", j_gene))
+  }else if(Chain != "IGH" & IgG1 != "All"){
+    df_for_VDJ_Hchain <- df_for_VDJ %>% subset(chain != "IGH" & Groups == Group & IgG == IgG1) %>% mutate(V_J_pairs = paste0(v_gene, "_", j_gene))
+  }
+  
+  df_for_VDJ_Hchain$Condition <- df_for_VDJ_Hchain$Condition %>% as.character()
+  
+  freqs_vdj_pairs <- with(df_for_VDJ_Hchain, table(Condition, V_J_pairs)) %>% t %>% unclass %>% as.data.frame()
+  rown <- row.names(freqs_vdj_pairs)
+  cs <- freqs_vdj_pairs %>% colSums()
+  
+  A28 <- length(rown) - c(rown[rowSums(freqs_vdj_pairs[, 1:2]) == 0] %>% length)
+  A42 <- length(rown) - c(rown[rowSums(freqs_vdj_pairs[, c(1, 3)]) == 0] %>% length)
+  print(c(A28 = A28, A42 = A42))
+  
+  results_A28_A0 <- lapply(1:dim(freqs_vdj_pairs)[1], FUN = function(vdj_comb) {
+    tmp_matrix <- matrix(c(freqs_vdj_pairs[vdj_comb, 2], freqs_vdj_pairs[vdj_comb, 1], cs[2]-freqs_vdj_pairs[vdj_comb, 2], cs[1]-freqs_vdj_pairs[vdj_comb, 1]), nrow = 2)
+    fisher <- fisher.test(tmp_matrix)
+    chisq <- chisq.test(tmp_matrix)
+    
+    if(min(tmp_matrix) < 5){
+      p <- fisher$p.value
+      OR <-  fisher$estimate
+      return(c(p, OR, rown[vdj_comb]))
+    } else {
+      p <- chisq$p.value
+      OR <-  fisher$estimate
+      return(c(p, OR, rown[vdj_comb]))
+    }
+  }
+  ) %>% do.call(rbind,. ) %>% as.data.frame()
+  
+  results_A42_A0 <- lapply(1:dim(freqs_vdj_pairs)[1], FUN = function(vdj_comb) {
+    tmp_matrix <- matrix(c(freqs_vdj_pairs[vdj_comb, 3], freqs_vdj_pairs[vdj_comb, 1],  cs[3]-freqs_vdj_pairs[vdj_comb, 3], cs[1]-freqs_vdj_pairs[vdj_comb, 1]), nrow = 2)
+    fisher <- fisher.test(tmp_matrix)
+    chisq <- chisq.test(tmp_matrix)
+    if(min(tmp_matrix) < 5){
+      p <- fisher$p.value
+      OR <-  fisher$estimate
+      return(c(p, OR, rown[vdj_comb]))
+    } else {
+      p <- chisq$p.value
+      OR <-  fisher$estimate
+      return(c(p, OR, rown[vdj_comb]))
+    }
+  }
+  ) %>% do.call(rbind,. ) %>% as.data.frame()
+  
+  
+  df <- data.frame(A28_A0 = results_A28_A0$`odds ratio` %>% as.numeric(),
+                   results_A42_A0 = results_A42_A0$`odds ratio` %>% as.numeric(),
+                   sig_A28 = results_A28_A0$V1 %>% as.numeric(),
+                   sig_A42 = results_A42_A0$V1 %>% as.numeric())
+  
+  row.names(df) <- rown
+  
+  results_A28_A0$V1 <- ifelse(as.numeric(results_A28_A0$V1) <= 0.05, 1, 0)
+  results_A28_A0$'odds ratio' <- results_A28_A0$'odds ratio' %>% as.numeric()
+  results_A28_A0$'odds ratio' <- mapvalues(results_A28_A0$'odds ratio', from = c(Inf), to = results_A28_A0$'odds ratio'[!is.infinite(results_A28_A0$'odds ratio')] %>% max)
+  
+  results_A42_A0$V1 <- ifelse(as.numeric(results_A42_A0$V1) <= 0.05, 1, 0)
+  results_A42_A0$'odds ratio' <- results_A42_A0$'odds ratio' %>% as.numeric()
+  results_A42_A0$'odds ratio' <- mapvalues(results_A42_A0$'odds ratio', from = c(Inf), to = results_A42_A0$'odds ratio'[!is.infinite(results_A42_A0$'odds ratio')] %>% max)
+  
+  dfs <- data.frame(A28_A0 = results_A28_A0$`odds ratio` %>% as.numeric(),
+                    results_A42_A0 = results_A42_A0$`odds ratio` %>% as.numeric(),
+                    sig_A28 = results_A28_A0$V1,
+                    sig_A42 = results_A42_A0$V1
+  )
+  
+  row.names(dfs) <- rown
+  dfs$Group <- ifelse(dfs$sig_A28 + dfs$sig_A42 == 2,
+                      "Both", ifelse(dfs$sig_A28 == 1 & dfs$sig_A42 == 0, "A28", ifelse(dfs$sig_A28 == 0 & dfs$sig_A42 == 1,"A42", "Non")))
+  dfs$Group <- factor(dfs$Group, levels = c("Both", "A28", "A42", "Non"))
+  dfs$labels <- paste0(rown, dfs$Group)
+  
+  dfs$labels <- gsub(dfs$labels, pattern = ".*Non$", replacement = "")
+  labes <- dfs$labels[dfs$results_A42_A0 > 1 | dfs$A28_A0 > 1]
+  dfs$labels <- ""
+  dfs$labels[dfs$results_A42_A0 > 1 | dfs$A28_A0 > 1] <- labes 
+  return(list(dfs, df))
+}
+
+IGH <- Odd_calculation("IGH", Group = "Virus", IgG1 = "All")
+Non_IGH <- Odd_calculation("IGLK", Group = "Virus", IgG1 = "All")
+
+df_ori <- rbind(IGH[[2]], Non_IGH[[2]]) %>% as.data.frame()
+df_ori %>% write.table(file = "Virus_High_usage_test_of_paired_VDJ_genes.txt", sep = "\t", col.names = T, row.names = T)
+
+dfs <- rbind(IGH[[1]], Non_IGH[[1]]) %>% as.data.frame()
+
+dfs[dfs[, 1] > 12, 1] <- 12
+dfs[dfs[, 2] > 12, 2] <- 12
+
+colrs <- c("#FC4E07", "#00AFBB", "#E7B800", "grey")
+names(colrs) <- c("Both", "A28", "A42", "Non")
+
+ggscatter(dfs, x = "A28_A0", y = "results_A42_A0",
+          color = "Group",
+          palette = colrs[dfs$Group %>% unique() %>% sort()],
+          label = "labels", repel = T, max.overlaps = Inf) +
+  scale_y_continuous(breaks = seq(0, max(dfs$results_A42_A0), 1)) +
+  scale_x_continuous(breaks = seq(0, max(dfs$A28_A0), 1)) +
+  geom_hline(yintercept = 1, linetype = "dashed", 
+             color = "red", size = 1) +
+  geom_vline(xintercept = 1, linetype = "dashed", 
+             color = "red", size = 1)
+
+
+###------------------------------------------------VDJ usasge of COVID19------------------------###############
+df_for_VDJ <- B_cell_clone_uniq %>%
+  dplyr::select(barcode, chain, Condition, clone_state, customer_clone, Patient_name, Major_celltype, v_gene, j_gene, Groups, Sampleinfo)
+
+Odd_calculation <- function(Chain, Group){
+  if(Chain == "IGH"){
+    df_for_VDJ_Hchain <- df_for_VDJ %>% subset(chain == "IGH" & Groups == Group) %>% mutate(V_J_pairs = paste0(v_gene, "_", j_gene))
+  } else if(Chain != "IGH") {
+    df_for_VDJ_Hchain <- df_for_VDJ %>% subset(chain != "IGH" & Groups == Group) %>% mutate(V_J_pairs = paste0(v_gene, "_", j_gene))
+  }
+  
+  df_for_VDJ_Hchain$Condition <- df_for_VDJ_Hchain$Condition %>% as.character()
+  
+  freqs_vdj_pairs <- with(df_for_VDJ_Hchain, table(Condition, V_J_pairs)) %>% t %>% unclass %>% as.data.frame()
+  rown <- row.names(freqs_vdj_pairs)
+  cs <- freqs_vdj_pairs %>% colSums()
+  
+  MC <- length(rown) - c(rown[rowSums(freqs_vdj_pairs[, 1:2]) == 0] %>% length)
+  MP <- length(rown) - c(rown[rowSums(freqs_vdj_pairs[, c(1, 3)]) == 0] %>% length)
+  SC <- length(rown) - c(rown[rowSums(freqs_vdj_pairs[, c(1, 4)]) == 0] %>% length)
+  SP <- length(rown) - c(rown[rowSums(freqs_vdj_pairs[, c(1, 5)]) == 0] %>% length)
+  print(c(MC = MC, MP = MP, SC = SC, SP = SP))
+  
+  Calculate_P_and_OR <- function(x, index1, index2, dat, cs) {result <- lapply(1:dim(x)[1], FUN = function(vdj_comb, index1, index2, dat, cs) {
+    ### x and dat are freqs_vdj_pairs
+    ### index1 and index2 is colum number of freqs_vdj_pairs, and index1 indicate the reference column; eg: index2 = 2, index1 = 1 indicated oR was index2/index1.
+    ### cs is colSums of freqs_vdj_pairs
+    tmp_matrix <- matrix(c(dat[vdj_comb, index2], dat[vdj_comb, index1], cs[index2]-dat[vdj_comb, index2], cs[index1]-dat[vdj_comb, index1]), nrow = 2)
+    fisher <- fisher.test(tmp_matrix)
+    chisq <- chisq.test(tmp_matrix)
+    if(min(tmp_matrix) < 5 & any(tmp_matrix[, 1]) == TRUE){
+      p <- fisher$p.value
+      OR <-  fisher$estimate
+      tmp <- c(p, OR, rown[vdj_comb])
+      return(tmp)
+    } else if(min(tmp_matrix) >= 5) {
+      p <- chisq$p.value
+      OR <-  fisher$estimate
+      tmp <- c(p, OR, rown[vdj_comb])
+      return(tmp)
+    } else {
+      p <- chisq$p.value
+      OR <-  fisher$estimate
+      tmp <- c(p, OR, rown[vdj_comb])
+      tmp[c(1)] <- 1
+      tmp[c(2)] <- 500
+      return(tmp)
+    }
+  }, index1 = index1, index2 = index2, dat = dat, cs = cs) %>% do.call(rbind,. ) %>% as.data.frame()
+  return(result)
+  }
+  
+  COV19_MC <- Calculate_P_and_OR(x = freqs_vdj_pairs, index1 = 1, index2 = 2, dat = freqs_vdj_pairs, cs = cs)   
+  COV19_MP <- Calculate_P_and_OR(x = freqs_vdj_pairs, index1 = 1, index2 = 3, dat = freqs_vdj_pairs, cs = cs)    
+  COV19_SC <- Calculate_P_and_OR(x = freqs_vdj_pairs, index1 = 1, index2 = 4, dat = freqs_vdj_pairs, cs = cs)    
+  COV19_SP <- Calculate_P_and_OR(x = freqs_vdj_pairs, index1 = 1, index2 = 5, dat = freqs_vdj_pairs, cs = cs)    
+  
+  df1 <- data.frame(COV19_MC_OR = COV19_MC$`odds ratio` %>% as.numeric(),
+                    COV19_SC_OR = COV19_SC$`odds ratio` %>% as.numeric(),
+                    sig_MC = COV19_MC$V1,
+                    sig_SC = COV19_SC$V1)
+  row.names(df1) <- rown
+  
+  df2 <- data.frame(COV19_MP_OR = COV19_MP$`odds ratio` %>% as.numeric(),
+                    COV19_SP_OR = COV19_SP$`odds ratio` %>% as.numeric(),
+                    sig_MP = COV19_MP$V1,
+                    sig_SP = COV19_SP$V1)
+  row.names(df2) <- rown
+  
+  df <- cbind(df1, df2) %>% as.data.frame()
+  
+  df_cp <- df
+  df_cp$sig_MC <- ifelse(as.numeric(df_cp$sig_MC) <= 0.05, 1, 0)
+  df_cp$sig_SC <- ifelse(as.numeric(df_cp$sig_SC) <= 0.05, 1, 0)
+  df_cp$sig_MP <- ifelse(as.numeric(df_cp$sig_MP) <= 0.05, 1, 0)
+  df_cp$sig_SP <- ifelse(as.numeric(df_cp$sig_SP) <= 0.05, 1, 0)
+  
+  df_cp$COV19_MC_OR <-  mapvalues(df_cp$COV19_MC_OR, from = c(Inf), to = df_cp$COV19_MC_OR[!is.infinite(df_cp$COV19_MC_OR)] %>% setdiff(500) %>% max)
+  df_cp$COV19_SC_OR <-  mapvalues(df_cp$COV19_SC_OR, from = c(Inf), to = df_cp$COV19_SC_OR[!is.infinite(df_cp$COV19_SC_OR)] %>% setdiff(500) %>% max)
+  df_cp$COV19_MP_OR <-  mapvalues(df_cp$COV19_MP_OR, from = c(Inf), to = df_cp$COV19_MP_OR[!is.infinite(df_cp$COV19_MP_OR)] %>% setdiff(500) %>% max)
+  df_cp$COV19_SP_OR <-  mapvalues(df_cp$COV19_SP_OR, from = c(Inf), to = df_cp$COV19_SP_OR[!is.infinite(df_cp$COV19_SP_OR)] %>% setdiff(500) %>% max)
+  
+  dfs <- df_cp
+  
+  row.names(dfs) <- rown
+  
+  C_group <- dfs[, 1:4] %>% subset(!c(COV19_MC_OR == 500 & COV19_SC_OR == 500)) %>% as.matrix()
+  C_group[C_group == 500] <- 1
+  C_group <- C_group %>% as.data.frame()
+  
+  S_group <- dfs[, 5:8] %>% subset(!c(COV19_MP_OR == 500 & COV19_SP_OR == 500)) %>% as.matrix()
+  S_group[S_group == 500] <- 1
+  S_group <- S_group %>% as.data.frame()
+  
+  ###------C_group-----####
+  C_group$Group <- ifelse(C_group$sig_MC + C_group$sig_SC == 2,
+                          "Both", ifelse(C_group$sig_MC == 1 & C_group$sig_SC == 0, "C", ifelse(C_group$sig_MC == 0 & C_group$sig_SC == 1, "P", "Non")))
+  
+  if(c(C_group$Group %>% unique %>% length) == 4){
+    C_group$Group <- factor(C_group$Group, levels = c("Both", "C", "P", "Non"))
+    C_group$labels <- paste0(rownames(C_group), C_group$Group)
+  } else if(c(C_group$Group %>% unique %>% length) > 0){
+    C_group$Group <- factor(C_group$Group, levels = intersect(c("Both", "C", "P", "Non"), c(C_group$Group %>% unique %>% length)))
+    C_group$labels <- paste0(rownames(C_group), C_group$Group)
+  }
+  
+  C_group$labels <- gsub(C_group$labels, pattern = ".*Non$", replacement = "")
+  labes <- C_group$labels[C_group$COV19_MC_OR > 1 & C_group$COV19_SC_OR > 1 & C_group$sig_MC == 1 & C_group$sig_SC == 1]
+  C_group$labels <- ""
+  C_group$labels[C_group$COV19_MC_OR > 1 & C_group$COV19_SC_OR > 1 & C_group$sig_MC == 1 & C_group$sig_SC == 1] <- labes
+  
+  ###------S_group-----####
+  S_group$Group <- ifelse(S_group$sig_MP + S_group$sig_SP == 2,
+                          "Both", ifelse(S_group$sig_MP == 1 & S_group$sig_SP == 0, "C", ifelse(S_group$sig_MP == 0 & S_group$sig_SP == 1, "P", "Non")))
+  
+  if(c(S_group$Group %>% unique %>% length) == 4){
+    S_group$Group <- factor(S_group$Group, levels = c("Both", "C", "P", "Non"))
+    S_group$labels <- paste0(rownames(S_group), S_group$Group)
+  } else if(c(S_group$Group %>% unique %>% length) > 0){
+    S_group$Group <- factor(S_group$Group, levels = intersect(c("Both", "C", "P", "Non"), c(S_group$Group %>% unique)))
+    S_group$labels <- paste0(rownames(S_group), S_group$Group)
+  }
+  
+  S_group$labels <- gsub(S_group$labels, pattern = ".*Non$", replacement = "")
+  labes <- S_group$labels[S_group$COV19_MP_OR > 1 & S_group$COV19_SP_OR > 1 & S_group$sig_MP == 1 & S_group$sig_SP == 1]
+  S_group$labels <- ""
+  S_group$labels[S_group$COV19_MP_OR > 1 & S_group$COV19_SP_OR > 1 & S_group$sig_MP == 1 & S_group$sig_SP == 1] <- labes
+  
+  return(list(df, C_group, S_group))
+}
+
+##--------------C: m grooup, P: S group
+IGH <- Odd_calculation(Chain = "IGH", Group = "Publication")
+Non_IGH <- Odd_calculation(Chain = "IGLK", Group = "Publication")
+
+# df_ori <- rbind(IGH[[1]], Non_IGH[[1]]) %>% as.data.frame()
+# df_ori %>% write.table(file = "COV19_all_usage_test_of_paired_VDJ_genes.txt", sep = "\t", col.names = T, row.names = T)
+
+dfs <- rbind(IGH[[3]], Non_IGH[[3]]) %>% as.data.frame() 
+dfs <- dfs %>% subset(c(dfs[,1] + dfs[,2]) > 0.0001)
+
+dfs[dfs[, 1] > 15, 1] <- 15
+dfs[dfs[, 2] > 15, 2] <- 15
+dfs <- dfs %>% as.data.frame()
+
+colrs <- c("#FC4E07", "#00AFBB", "#E7B800", "grey")
+names(colrs) <- c("Both", "P", "C", "Non")
+
+ggscatter(dfs, x = colnames(dfs)[1], y = colnames(dfs)[2],
+          color = "Group",
+          palette = colrs[dfs$Group %>% unique() %>% sort()],
+          label = "labels", repel = T) +
+  scale_y_continuous(breaks = seq(0, max(dfs[, 2]), 0.5)) +
+  scale_x_continuous(breaks = seq(0, max(dfs[, 1]), 0.5)) +
+  geom_hline(yintercept = 1, linetype = "dashed", 
+             color = "red", size = 1) +
+  geom_vline(xintercept = 1, linetype = "dashed", 
+             color = "red", size = 1)
