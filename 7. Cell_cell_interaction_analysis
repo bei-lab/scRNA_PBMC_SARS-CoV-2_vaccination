@@ -1,0 +1,277 @@
+###-------------------------------------------------------------------------------------Prepare input for CellphoneDB---------------------------------####
+library("AnnotationDbi")
+library("org.Hs.eg.db")
+library(Seurat)##Seurat V3.1.5 was used
+library(Matrix)
+library(stringr)
+library(gridExtra)
+library(ggplot2)
+library(stringi)
+library(plyr)
+library(ggthemes)
+library(cowplot)
+library(RColorBrewer)
+library(ComplexHeatmap)
+library(pheatmap)
+library(reshape2)
+library(scales)
+library(rlang)
+library(future)
+library(parallel)
+library(ggrepel)
+library(ggsci)
+library(dplyr)
+library(harmony)
+library(sigminer)
+library(ggpubr)
+library(rstatix)
+library(data.table)
+library(clusterProfiler)
+library(tidyverse)
+options(ggrepel.max.overlaps = Inf)
+
+options(future.globals.maxSize = 400*1000 * 1024^2)
+plan("multiprocess", workers = 12)
+plan()
+
+modified_mapvalues <- function(x, from, to, warn_missing = TRUE, Substitute = NULL){
+  result <- plyr::mapvalues(x, from, to, warn_missing = TRUE)
+  if(!missing(Substitute)){
+    result[x == result] <- Substitute
+    return(result)
+  } else {
+    return(result)
+  }
+}
+
+Genes_ens <-  mapIds(org.Hs.eg.db,
+                  keys = subset_cells %>% row.names(), 
+                  column="ENSEMBL",
+                  keytype="SYMBOL",
+                  multiVals="first") %>% as.data.frame()
+
+Genes_ens <- Genes_ens %>% subset(!is.na(Genes_ens))
+Genes_ens <- rownames_to_column(Genes_ens, var = "Gene.name")
+colnames(Genes_ens)[2] <- "Gene.stable.ID"
+
+write.table(Genes_ens, "Symbol_Ensemal.txt", row.names = T, col.names = T, sep = "\t", quote = F)
+
+load("/data4/heshuai/RAW_data/1-SingleCell/21.COV19_vaccine/1.House_in_dat/3.Analysis/Reanalysis_COVID19_Virus/Annotation.all_cells.meta.data_788534_COVID19_virus.RData")
+
+DefaultAssay(subset_cells) <- "RNA"
+subset_cells@assays$RNA@data <- subset_cells@assays$RNA@counts
+subset_cells <- NormalizeData(subset_cells)
+subset_cells <- ScaleData(subset_cells, features = VariableFeatures(subset_cells))
+
+T_cell_metadata <- read.table("/data4/heshuai/RAW_data/1-SingleCell/21.COV19_vaccine/1.House_in_dat/3.Analysis/Reanalysis_COVID19_Virus/TNK/meta.data.TNK.cell.txt",
+                              header = T, row.names = 1, stringsAsFactors = F, sep = "\t")
+
+Myeloid_cell_metadata <- read.table("/data4/heshuai/RAW_data/1-SingleCell/21.COV19_vaccine/1.House_in_dat/3.Analysis/Reanalysis_COVID19_Virus/Myeloid/Myeloid_meta.data.txt",
+                                    header = T, row.names = 1, stringsAsFactors = F, sep = "\t")
+
+B_cell_metadata <- read.table("/data4/heshuai/RAW_data/1-SingleCell/21.COV19_vaccine/1.House_in_dat/3.Analysis/Reanalysis_COVID19_Virus/B_cells/meta.data.of.B.cells.txt",
+                              header = T, row.names = 1, stringsAsFactors = F, sep = "\t")
+
+selected_T <-  T_cell_metadata %>% dplyr::select(Sampleinfo, Groups, Condition, Vaccine_type, IgG, Major_celltype)
+setnames(selected_T, old = "Major_celltype", new = "CellType")
+selected_M <- Myeloid_cell_metadata %>% dplyr::select(Sampleinfo, Groups, Condition, Vaccine_type, IgG, Major_celltype)
+setnames(selected_M, old = "Major_celltype", new = "CellType")
+selected_B <- B_cell_metadata %>% dplyr::select(Sampleinfo, Groups, Condition, Vaccine_type, IgG, Major_celltype)
+setnames(selected_B, old = "Major_celltype", new = "CellType")
+
+selected_dat <- rbind(selected_T, selected_M, selected_B) %>% as.data.frame() %>% subset(CellType != "Doublets")
+selected_dat$CellType <- selected_dat$CellType %>% gsub(pattern = ".*Plasma", replacement = "Plasma")
+
+subset_cells <- subset_cells[, selected_dat %>% rownames()]
+subset_cells$CellType <- mapvalues(subset_cells %>% colnames,
+                                   from = selected_dat %>% row.names(),
+                                   to = selected_dat$CellType %>% as.character())
+
+####--------------------subset cells according tissues----------------#####
+subset_cells$Condition <- subset_cells$Condition %>%
+  as.character %>%
+  gsub(pattern = "control-control-", replacement = "HD") %>% 
+  gsub(pattern = "mild/moderate-progression-", replacement = "MP") %>% 
+  gsub(pattern = "mild/moderate-convalescence-", replacement = "MC") %>% 
+  gsub(pattern = "severe/critical-progression-", replacement = "SP") %>% 
+  gsub(pattern = "severe/critical-convalescence-", replacement = "SC") %>% 
+  gsub(pattern = "Virus-A0", replacement = "IVV-D0") %>% 
+  gsub(pattern = "Virus-A28", replacement = "IVV-D28") %>% 
+  gsub(pattern = "Virus-A42", replacement = "IVV-D42")
+
+subset_cells$Condition <- factor(subset_cells$Condition %>% as.character(), levels = c("HD",
+                                                                                       "MP",
+                                                                                       "MC",
+                                                                                       "SP",
+                                                                                       "SC",
+                                                                                       "IVV-D0",
+                                                                                       "IVV-D28",
+                                                                                       "IVV-D42"))
+
+genes_ens <- read.table("/data4/heshuai/RAW_data/1-SingleCell/21.COV19_vaccine/1.House_in_dat/3.Analysis/Cell_interaction/Symbol_Ensemal.txt",
+                        header = T, sep = "\t", stringsAsFactors = F)
+
+for(CD in c(subset_cells$Condition %>% unique %>% as.character())[]){
+subset_cell <- subset_cells %>% subset(Condition == CD)
+print(CD)
+meta.data <- subset_cell@meta.data %>% as.data.frame()
+meta.data <- rownames_to_column(meta.data, var = "cell_barcodes")
+meta.data$Cell_type <- meta.data$CellType %>% make.names()
+
+tmp_dat <- data.frame()
+
+for (CT in c(meta.data$Cell_type %>% unique)) {
+  tmp <- meta.data %>% subset(Cell_type %in% CT)
+  if(dim(tmp)[1] <= 1000 & dim(tmp)[1] >= 10){
+    tmp_dat <- rbind(tmp_dat, tmp)
+  } else if(dim(tmp)[1] > 1000) {
+    set.seed(1)
+    tmp_dat <- rbind(tmp_dat, tmp[tmp$cell_barcodes %in% sample(tmp$cell_barcodes, 1000, replace = F), ])
+  } else {
+    tmp_dat <- rbind(tmp_dat)
+  }
+}
+print(dim(tmp_dat))
+
+subset_cell <- subset(subset_cell, cells = tmp_dat$cell_barcodes)
+mtx_expr <- subset_cell@assays$RNA@data %>% as.matrix()
+clns <- mtx_expr %>% colnames()
+
+print("cbind(row.names(mtx_expr), mtx_expr)")
+mtx_expr <- cbind(row.names(mtx_expr), mtx_expr)## "Cell    cell_type"
+colnames(mtx_expr) <- c("Gene", clns)
+print("cbind(row.names(mtx_expr), mtx_expr) done !")
+
+mtx_expr[, "Gene"] <- modified_mapvalues(mtx_expr %>% row.names,
+                                         from = genes_ens$Gene.name,
+                                         to = genes_ens$Gene.stable.ID, Substitute="NA")
+selected_mtx_expr <- mtx_expr[mtx_expr[, "Gene"] != "NA", c("Gene", tmp_dat$cell_barcodes %>% as.character())] 
+
+##-------export the exprssion matrix---------------------------------######
+write.table(selected_mtx_expr, file = paste0(make.names(CD), "_cDNA_normalized_expression.txt"), row.names = F, sep = "\t", quote = F)
+
+print("export the exprssion matrix done !")
+##-------export the cell type data.frame-----------------------------######
+selected_cols <- meta.data %>% subset(cell_barcodes %in% c(selected_mtx_expr %>% colnames)) %>% dplyr::select(cell_barcodes, Cell_type)
+colnames(selected_cols) <- c("Cell", "cell_type")
+
+write.table(selected_cols,  paste0(make.names(CD), "_cDNA_Cell_type_modified.txt"), sep = "\t", row.names = F, quote = F)
+print("export the cell type data.frame done !")
+# dir.create(tissue)
+}
+
+genes_ens <- read.table("/data4/heshuai/RAW_data/1-SingleCell/21.COV19_vaccine/1.House_in_dat/3.Analysis/Cell_interaction/Symbol_Ensemal.txt",
+                        header = T, sep = "\t", stringsAsFactors = F)
+
+x <- 0
+for(CD in c("IVV-D0", "IVV-D28", "IVV-D42", "IVV-D0", "IVV-D28", "IVV-D42")){
+  x <- x+1
+  if(x <= 3){
+  subset_cell <- subset_cells %>% subset(Condition == CD & IgG == "Low")
+  print(CD)
+  meta.data <- subset_cell@meta.data %>% as.data.frame()
+  meta.data <- rownames_to_column(meta.data, var = "cell_barcodes")
+  meta.data$Cell_type <- meta.data$CellType %>% make.names()
+  
+  tmp_dat <- data.frame()
+  
+  for (CT in c(meta.data$Cell_type %>% unique)) {
+    tmp <- meta.data %>% subset(Cell_type %in% CT)
+    if(dim(tmp)[1] <= 1000 & dim(tmp)[1] >= 10){
+      tmp_dat <- rbind(tmp_dat, tmp)
+    } else if(dim(tmp)[1] > 1000) {
+      set.seed(1)
+      tmp_dat <- rbind(tmp_dat, tmp[tmp$cell_barcodes %in% sample(tmp$cell_barcodes, 1000, replace = F), ])
+    } else {
+      tmp_dat <- rbind(tmp_dat)
+    }
+  }
+  print(dim(tmp_dat))
+  
+  subset_cell <- subset(subset_cell, cells = tmp_dat$cell_barcodes)
+  mtx_expr <- subset_cell@assays$RNA@data %>% as.matrix()
+  clns <- mtx_expr %>% colnames()
+  
+  print("cbind(row.names(mtx_expr), mtx_expr)")
+  mtx_expr <- cbind(row.names(mtx_expr), mtx_expr)## "Cell    cell_type"
+  colnames(mtx_expr) <- c("Gene", clns)
+  print("cbind(row.names(mtx_expr), mtx_expr) done !")
+  
+  mtx_expr[, "Gene"] <- modified_mapvalues(mtx_expr %>% row.names,
+                                           from = genes_ens$Gene.name,
+                                           to = genes_ens$Gene.stable.ID, Substitute="NA")
+  selected_mtx_expr <- mtx_expr[mtx_expr[, "Gene"] != "NA", c("Gene", tmp_dat$cell_barcodes %>% as.character())] 
+  
+  ##-------export the exprssion matrix---------------------------------######
+  write.table(selected_mtx_expr, file = paste0(make.names(CD),".low", "_cDNA_normalized_expression.txt"), row.names = F, sep = "\t", quote = F)
+  
+  print("export the exprssion matrix done !")
+  ##-------export the cell type data.frame-----------------------------######
+  selected_cols <- meta.data %>% subset(cell_barcodes %in% c(selected_mtx_expr %>% colnames)) %>% dplyr::select(cell_barcodes, Cell_type)
+  colnames(selected_cols) <- c("Cell", "cell_type")
+  
+  write.table(selected_cols,  paste0(make.names(CD),".low", "_cDNA_Cell_type_modified.txt"), sep = "\t", row.names = F, quote = F)
+  print("export the cell type data.frame done !")
+  } else {
+    subset_cell <- subset_cells %>% subset(Condition == CD & IgG == "High")
+    print(CD)
+    meta.data <- subset_cell@meta.data %>% as.data.frame()
+    meta.data <- rownames_to_column(meta.data, var = "cell_barcodes")
+    meta.data$Cell_type <- meta.data$CellType %>% make.names()
+    
+    tmp_dat <- data.frame()
+    
+    for (CT in c(meta.data$Cell_type %>% unique)) {
+      tmp <- meta.data %>% subset(Cell_type %in% CT)
+      if(dim(tmp)[1] <= 1000 & dim(tmp)[1] >= 10){
+        tmp_dat <- rbind(tmp_dat, tmp)
+      } else if(dim(tmp)[1] > 1000) {
+        set.seed(1)
+        tmp_dat <- rbind(tmp_dat, tmp[tmp$cell_barcodes %in% sample(tmp$cell_barcodes, 1000, replace = F), ])
+      } else {
+        tmp_dat <- rbind(tmp_dat)
+      }
+    }
+    print(dim(tmp_dat))
+    
+    subset_cell <- subset(subset_cell, cells = tmp_dat$cell_barcodes)
+    mtx_expr <- subset_cell@assays$RNA@data %>% as.matrix()
+    clns <- mtx_expr %>% colnames()
+    
+    print("cbind(row.names(mtx_expr), mtx_expr)")
+    mtx_expr <- cbind(row.names(mtx_expr), mtx_expr)## "Cell    cell_type"
+    colnames(mtx_expr) <- c("Gene", clns)
+    print("cbind(row.names(mtx_expr), mtx_expr) done !")
+    
+    mtx_expr[, "Gene"] <- modified_mapvalues(mtx_expr %>% row.names,
+                                             from = genes_ens$Gene.name,
+                                             to = genes_ens$Gene.stable.ID, Substitute="NA")
+    selected_mtx_expr <- mtx_expr[mtx_expr[, "Gene"] != "NA", c("Gene", tmp_dat$cell_barcodes %>% as.character())] 
+    
+    ##-------export the exprssion matrix---------------------------------######
+    write.table(selected_mtx_expr, file = paste0(make.names(CD),".high", "_cDNA_normalized_expression.txt"), row.names = F, sep = "\t", quote = F)
+    
+    print("export the exprssion matrix done !")
+    ##-------export the cell type data.frame-----------------------------######
+    selected_cols <- meta.data %>% subset(cell_barcodes %in% c(selected_mtx_expr %>% colnames)) %>% dplyr::select(cell_barcodes, Cell_type)
+    colnames(selected_cols) <- c("Cell", "cell_type")
+    
+    write.table(selected_cols,  paste0(make.names(CD),".high", "_cDNA_Cell_type_modified.txt"), sep = "\t", row.names = F, quote = F)
+    print("export the cell type data.frame done !")
+  }
+}
+
+###-----------------------------------Step 2. Run CellphoneDB------------------------------###
+/data/home/heshuai/Miniconda3/bin/cellphonedb method statistical_analysis \
+--project-name GROUP \
+--iterations 1000 \
+--threshold 0.05 \
+--result-precision 3 \
+--output-path /data4/heshuai/RAW_data/1-SingleCell/21.COV19_vaccine/1.House_in_dat/3.Analysis/Reanalysis_COVID19_Virus/Cell_cell_interaction/Result_CellphoneDB \
+--verbose \
+--threads 16 \
+/data4/heshuai/RAW_data/1-SingleCell/21.COV19_vaccine/1.House_in_dat/3.Analysis/Reanalysis_COVID19_Virus/Cell_cell_interaction/cDNA_Cell_type_modified.txt  \
+/data4/heshuai/RAW_data/1-SingleCell/21.COV19_vaccine/1.House_in_dat/3.Analysis/Reanalysis_COVID19_Virus/Cell_cell_interaction/cDNA_normalized_expression.txt
+
+
+
