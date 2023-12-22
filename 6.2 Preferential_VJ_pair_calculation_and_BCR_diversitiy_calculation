@@ -408,7 +408,7 @@ ggscatter(dfs, x = colnames(dfs)[1], y = colnames(dfs)[2],
   geom_vline(xintercept = 1, linetype = "dashed", 
              color = "red", size = 1)
 
-###----------------------------------merged_meta.T_data.txt----------------------------demo data
+###----------------------------------merged_meta.B_data.txt----------------------------demo data
 "orig.ident"	"SampleID"	"fixed_sample_ID"	"Time_point"	"Patient_name"	"Sex"	"Vaccine_type"	"IgG"	"Batch_new"	"Samples_new"	"Sampleinfo"	"Groups"	"Condition"	"Major_celltype"	"Sample_s"	"barcodes"	"fixed_barcodes"	"cloned_Bcells"	"multiple_clones"	"customer_clone"
 "S1_hashtag_gene_1_AAACCTGAGACAGAGA-1"	"S1_1"	NA	"S1"	"A28"	"xxm"	"female"	"Virus"	"High"	"Bei"	"S1_A255"	"S1-A28"	"Virus"	"Virus-A28"	"ITGB1 memory B"	"S1_1"	"AAACCTGAGACAGAGA-1"	"S1_1_AAACCTGAGACAGAGA-1"	"S1-A28"	"Single"	"IGLV2-14IGLJ3CSSYTSSSTWVFIGHV4-59IGHJ5CARGGAFGGVFDPW"
 "S1_hashtag_gene_1_AAACCTGCAGACGCAA-1"	"S1_1"	NA	"S1"	"A0"	"xxm"	"female"	"Virus"	"High"	"Bei"	"S1_A253"	"S1-A0"	"Virus"	"Virus-A0"	"Intermediate memory B"	"S1_1"	"AAACCTGCAGACGCAA-1"	"S1_1_AAACCTGCAGACGCAA-1"	"S1-A0"	"Multiple"	"IGKV3-11IGKJ4CQQRSNWPLTFIGHV3-23IGHJ4CARGYYGSGSPIDYW"
@@ -440,7 +440,7 @@ ggscatter(dfs, x = colnames(dfs)[1], y = colnames(dfs)[2],
 ......
 ......
 
-###----------------------------------merged_TCR.information_at_least_one_paired_VDJ.txt----------------------------demo data
+###----------------------------------merged_BCR.information_at_least_one_paired_VDJ.txt----------------------------demo data
 "barcode"	"high_confidence"	"length"	"chain"	"v_gene"	"d_gene"	"j_gene"	"c_gene"	"full_length"	"productive"	"fwr1"	"cdr1"	"cdr1_nt"	"fwr2"	"cdr2"	"cdr2_nt"	"fwr3"	"fwr3_nt"	"cdr3"	"cdr3_nt"	"fwr4"	"fwr4_nt"	"reads"	"umis"	"raw_clonotype_id"	"exact_subclonotype_id"	"Sample_s"	"raw_barcode"	"Sampleinfo"	"Vaccine_type"	"Groups"	"IgG"	"Sex"	"Condition"	"Time_point"	"Major_celltype"	"unique_clone"	"customer_clone"	"multiple_clones"	"clone_state"
 "1"	"S1_1_AAACCTGAGACAGAGA-1"	"true"	522	"IGH"	"IGHV4-59"	""	"IGHJ5"	"IGHM"	"true"	"true"	"QVQLQESGPGLVKPSETLSLTCTVS"	"GGSISSY"	"GGTGGCTCCATCAGTAGTTAC"	"YWSWIRQPAGKGLEWVGRI"	"YTSGS"	"TATACCAGTGGGAGC"	"TNYNPSLESRVTMSVDTSKNQFSLKLSSVTAADTAMYY"	"ACCAACTACAACCCCTCCCTCGAGAGTCGAGTCACCATGTCAGTAGACACGTCCAAGAACCAGTTCTCCCTGAAGCTGAGCTCTGTGACCGCCGCGGACACGGCCATGTATTAC"	"CARGGAFGGVFDPW"	"TGTGCGAGAGGCGGGGCATTTGGGGGAGTTTTCGACCCCTGG"	"GQGTLVTVSS"	"GGCCAGGGAACCCTGGTCACCGTCTCCTCAG"	7208	34	"clonotype785"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGAGACAGAGA-1"	"S1-A28"	"Virus"	"Virus"	"High"	"female"	"Virus-A28"	"A28"	"ITGB1 memory B"	"IGHV4-59IGHJ5CARGGAFGGVFDPW"	"IGLV2-14IGLJ3CSSYTSSSTWVFIGHV4-59IGHJ5CARGGAFGGVFDPW"	"Single"	"Single"
 "2"	"S1_1_AAACCTGAGACAGAGA-1"	"true"	645	"IGL"	"IGLV2-14"	""	"IGLJ3"	"IGLC2"	"true"	"true"	"QSALTQPASVSGSPGQSITISC"	"TGTSSDVGGYNYVS"	"ACTGGAACCAGCAGTGACGTTGGTGGTTATAACTATGTCTCC"	"WYQQHPGKAPKLMIY"	"DVSKRPS"	"GATGTCAGTAAGCGGCCCTCA"	"GVSNRFSGSKSGNTASLTISGLQAEDEAYYY"	"GGGGTTTCTAATCGCTTCTCTGGCTCCAAGTCTGGCAACACGGCCTCCCTGACCATCTCTGGACTCCAGGCTGAGGACGAGGCTTATTATTAC"	"CSSYTSSSTWVF"	"TGCAGCTCATATACAAGCAGCAGCACTTGGGTGTTC"	"GGGTKLTVL"	"GGCGGAGGGACCAAGCTGACCGTCCTAG"	26166	77	"clonotype785"	1	"S1_1"	"S1_hashtag_gene_1_AAACCTGAGACAGAGA-1"	"S1-A28"	"Virus"	"Virus"	"High"	"female"	"Virus-A28"	"A28"	"ITGB1 memory B"	"IGLV2-14IGLJ3CSSYTSSSTWVF"	"IGLV2-14IGLJ3CSSYTSSSTWVFIGHV4-59IGHJ5CARGGAFGGVFDPW"	"Single"	"Single"
